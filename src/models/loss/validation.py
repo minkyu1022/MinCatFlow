@@ -434,17 +434,42 @@ def _structural_validity(atoms: Atoms) -> bool:
 
     return basic_valid
 
+def _prim_structural_validity(atoms: Atoms) -> bool:
+    """Check structural validity of an Atoms object."""
+    # 1. Check cell volume
+    try:
+        vol = float(atoms.get_volume())
+        vol_ok = vol >= 0.1
+    except Exception:
+        vol_ok = False
+
+    # 2. Check atom clash
+    try:
+        if len(atoms) > 1:
+            dists = atoms.get_all_distances()
+            # Exclude self-distance (0)
+            min_dist = np.min(dists[np.nonzero(dists)])
+            dist_ok = min_dist >= 0.5
+  
+        else:
+            dist_ok = True  # Skip distance check for single atom
+    except Exception:
+        dist_ok = False
+
+    # 5. Basic validity check
+    basic_valid = bool(vol_ok and dist_ok)
+
+    return basic_valid
+
 def compute_structural_validity_single(
     args: Tuple[
-        np.ndarray,  # sampled_prim_slab_coords: (n_samples, n_prim_slab_atoms, 3)
-        np.ndarray,  # sampled_ads_coords: (n_samples, n_ads_atoms, 3)
-        np.ndarray,  # sampled_lattices: (n_samples, 6)
-        np.ndarray,  # sampled_supercell_matrices: (n_samples, 3, 3) or (n_samples, 9)
-        np.ndarray,  # sampled_scaling_factors: (n_samples,)
-        np.ndarray,  # prim_slab_atom_types: (n_prim_slab_atoms,)
-        np.ndarray,  # ads_atom_types: (n_ads_atoms,)
-        np.ndarray,  # prim_slab_atom_mask: (n_prim_slab_atoms,) bool
-        np.ndarray,  # ads_atom_mask: (n_ads_atoms,) bool
+        np.ndarray,  # sampled_coords: (n_samples, n_atoms, 3)
+        np.ndarray,  # sampled_lattices: (n_samples, 6) - lattice parameters (a, b, c, alpha, beta, gamma)
+        np.ndarray,  # true_coords: (n_atoms, 3)
+        np.ndarray,  # true_lattices: (6,) - lattice parameters (a, b, c, alpha, beta, gamma)
+        np.ndarray,  # atom_types: (n_atoms,)
+        np.ndarray,  # atom_mask: (n_atoms,) bool
+        Dict[str, Any],  # matcher_kwargs
     ],
 ) -> List[bool]:
     """
@@ -510,105 +535,182 @@ def compute_structural_validity_single(
     
     return results
 
-
-def compute_adsorption_and_validity_single(
-    sampled_prim_slab_coords: np.ndarray,  # (n_samples, n_prim_slab_atoms, 3)
-    sampled_ads_coords: np.ndarray,  # (n_samples, n_ads_atoms, 3)
-    sampled_lattices: np.ndarray,  # (n_samples, 6)
-    sampled_supercell_matrices: np.ndarray,  # (n_samples, 3, 3) or (n_samples, 9)
-    sampled_scaling_factors: np.ndarray,  # (n_samples,)
-    prim_slab_atom_types: np.ndarray,  # (n_prim_slab_atoms,)
-    ads_atom_types: np.ndarray,  # (n_ads_atoms,)
-    prim_slab_atom_mask: np.ndarray,  # (n_prim_slab_atoms,) bool
-    ads_atom_mask: np.ndarray,  # (n_ads_atoms,) bool
-    calc: FAIRChemCalculator,  # Pre-initialized calculator
-) -> List[Dict[str, Any]]:
+def compute_prim_structural_validity_single(
+    args: Tuple[
+        np.ndarray,  # sampled_prim_slab_coords: (n_samples, n_prim_slab_atoms, 3)
+        np.ndarray,  # sampled_ads_coords: (n_samples, n_ads_atoms, 3)
+        np.ndarray,  # sampled_lattices: (n_samples, 6)
+        np.ndarray,  # sampled_supercell_matrices: (n_samples, 3, 3) or (n_samples, 9)
+        np.ndarray,  # sampled_scaling_factors: (n_samples,)
+        np.ndarray,  # prim_slab_atom_types: (n_prim_slab_atoms,)
+        np.ndarray,  # ads_atom_types: (n_ads_atoms,)
+        np.ndarray,  # prim_slab_atom_mask: (n_prim_slab_atoms,) bool
+        np.ndarray,  # ads_atom_mask: (n_ads_atoms,) bool
+    ],
+) -> List[bool]:
     """
-    Compute adsorption energy and structural validity for sampled structures.
+    Compute structural validity for sampled structures (without adsorption energy calculation).
     
     This function reconstructs the full system from prim_slab using supercell_matrix
-    and scaling_factor, following the same logic as scripts/assemble.py.
+    and scaling_factor, then checks structural validity.
+    
+    Designed to be run in parallel with ProcessPool.
     
     Args:
-        sampled_prim_slab_coords: Sampled prim slab coordinates (n_samples, n_atoms, 3)
-        sampled_ads_coords: Sampled adsorbate coordinates (n_samples, n_ads_atoms, 3)
-        sampled_lattices: Sampled lattice parameters (n_samples, 6)
-        sampled_supercell_matrices: Supercell transformation matrices (n_samples, 3, 3) or (n_samples, 9)
-        sampled_scaling_factors: Z-direction scaling factors (n_samples,)
-        prim_slab_atom_types: Atomic numbers for prim slab atoms
-        ads_atom_types: Atomic numbers for adsorbate atoms
-        prim_slab_atom_mask: Boolean mask for valid prim slab atoms
-        ads_atom_mask: Boolean mask for valid adsorbate atoms
-        calc: Pre-initialized FAIRChemCalculator (reused across calls)
+        args: Tuple containing:
+            - sampled_prim_slab_coords: Sampled prim slab coordinates (n_samples, n_atoms, 3)
+            - sampled_ads_coords: Sampled adsorbate coordinates (n_samples, n_ads_atoms, 3)
+            - sampled_lattices: Sampled lattice parameters (n_samples, 6)
+            - sampled_supercell_matrices: Supercell transformation matrices (n_samples, 3, 3) or (n_samples, 9)
+            - sampled_scaling_factors: Z-direction scaling factors (n_samples,)
+            - prim_slab_atom_types: Atomic numbers for prim slab atoms
+            - ads_atom_types: Atomic numbers for adsorbate atoms
+            - prim_slab_atom_mask: Boolean mask for valid prim slab atoms
+            - ads_atom_mask: Boolean mask for valid adsorbate atoms
     
     Returns:
-        List of dicts containing E_adsorption and struct_valid for each sample.
+        List of structural validity booleans for each sample.
     """
-    n_samples = sampled_prim_slab_coords.shape[0]
+    (
+        sampled_coords,
+        sampled_lattices,
+        atom_types,
+        atom_mask,
+        matcher_kwargs,
+    ) = args
     
-    # Get valid adsorbate types for creating ads_atoms (for energy lookup)
-    valid_ads_types = ads_atom_types[ads_atom_mask]
-    
+    n_samples = sampled_coords.shape[0]
+    valid_atom_types = atom_types[atom_mask]
     results = []
     for i in range(n_samples):
         try:
             # Use assemble function to reconstruct the system
-            recon_system, recon_slab = assemble(
-                generated_prim_slab_coords=sampled_prim_slab_coords[i],
-                generated_ads_coords=sampled_ads_coords[i],
-                generated_lattice=sampled_lattices[i],
-                generated_supercell_matrix=sampled_supercell_matrices[i].reshape(3, 3),
-                generated_scaling_factor=sampled_scaling_factors[i],
-                prim_slab_atom_types=prim_slab_atom_types,
-                ads_atom_types=ads_atom_types,
-                prim_slab_atom_mask=prim_slab_atom_mask,
-                ads_atom_mask=ads_atom_mask,
+            sampled_lattice = Lattice.from_parameters(
+                a=sampled_lattices[i, 0],
+                b=sampled_lattices[i, 1],
+                c=sampled_lattices[i, 2],
+                alpha=sampled_lattices[i, 3],
+                beta=sampled_lattices[i, 4],
+                gamma=sampled_lattices[i, 5],
             )
             
-            # Create ads_atoms (adsorbate only, without cell, for energy lookup)
-            valid_ads_coords = sampled_ads_coords[i][ads_atom_mask]
-            ads_atoms = Atoms(
-                numbers=valid_ads_types,
-                positions=valid_ads_coords,
+            sampled_valid_coords = sampled_coords[i][atom_mask]
+            
+            sampled_structure = Structure(
+                lattice=sampled_lattice,
+                species=valid_atom_types.tolist(),
+                coords=sampled_valid_coords,
+                coords_are_cartesian=True,
             )
-            
-            # Check structural validity BEFORE relaxation
-            struct_valid = _structural_validity(recon_system)
-            
-            if not struct_valid:
-                # Skip relaxation for invalid structures
-                results.append({
-                    "E_adsorption": float('nan'),
-                    "struct_valid": False,
-                })
-                continue
-            
-            # Compute adsorption energy with relaxation (suppress LBFGS output)
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                e_ads, e_sys, e_slab, e_adsorbate = relaxation_and_compute_adsorption_energy(
-                    calc, recon_system, recon_slab, ads_atoms
-                )
-            
-            # Check if calculation succeeded
-            if e_ads == 999.0 or np.isnan(e_ads):
-                results.append({
-                    "E_adsorption": float('nan'),
-                    "struct_valid": struct_valid,
-                })
-            else:
-                results.append({
-                    "E_adsorption": float(e_ads),
-                    "struct_valid": struct_valid,
-                })
+            # Check structural validity
+            struct_valid = _prim_structural_validity(adaptor.get_atoms(sampled_structure))
+            results.append(struct_valid)
                 
         except Exception as e:
-            print(f"WARNING: Failed to compute adsorption energy for sample {i}: {e}", file=sys.stderr)
-            results.append({
-                "E_adsorption": float('nan'),
-                "struct_valid": False,
-            })
+            print(f"WARNING: Failed to compute primitive structural validity for sample {i}: {e}", file=sys.stderr)
+            results.append(False)
     
     return results
+
+
+# def compute_adsorption_and_validity_single(
+#     sampled_prim_slab_coords: np.ndarray,  # (n_samples, n_prim_slab_atoms, 3)
+#     sampled_ads_coords: np.ndarray,  # (n_samples, n_ads_atoms, 3)
+#     sampled_lattices: np.ndarray,  # (n_samples, 6)
+#     sampled_supercell_matrices: np.ndarray,  # (n_samples, 3, 3) or (n_samples, 9)
+#     sampled_scaling_factors: np.ndarray,  # (n_samples,)
+#     prim_slab_atom_types: np.ndarray,  # (n_prim_slab_atoms,)
+#     ads_atom_types: np.ndarray,  # (n_ads_atoms,)
+#     prim_slab_atom_mask: np.ndarray,  # (n_prim_slab_atoms,) bool
+#     ads_atom_mask: np.ndarray,  # (n_ads_atoms,) bool
+#     calc: FAIRChemCalculator,  # Pre-initialized calculator
+# ) -> List[Dict[str, Any]]:
+#     """
+#     Compute adsorption energy and structural validity for sampled structures.
+    
+#     This function reconstructs the full system from prim_slab using supercell_matrix
+#     and scaling_factor, following the same logic as scripts/assemble.py.
+    
+#     Args:
+#         sampled_prim_slab_coords: Sampled prim slab coordinates (n_samples, n_atoms, 3)
+#         sampled_ads_coords: Sampled adsorbate coordinates (n_samples, n_ads_atoms, 3)
+#         sampled_lattices: Sampled lattice parameters (n_samples, 6)
+#         sampled_supercell_matrices: Supercell transformation matrices (n_samples, 3, 3) or (n_samples, 9)
+#         sampled_scaling_factors: Z-direction scaling factors (n_samples,)
+#         prim_slab_atom_types: Atomic numbers for prim slab atoms
+#         ads_atom_types: Atomic numbers for adsorbate atoms
+#         prim_slab_atom_mask: Boolean mask for valid prim slab atoms
+#         ads_atom_mask: Boolean mask for valid adsorbate atoms
+#         calc: Pre-initialized FAIRChemCalculator (reused across calls)
+    
+#     Returns:
+#         List of dicts containing E_adsorption and struct_valid for each sample.
+#     """
+#     n_samples = sampled_prim_slab_coords.shape[0]
+    
+#     # Get valid adsorbate types for creating ads_atoms (for energy lookup)
+#     valid_ads_types = ads_atom_types[ads_atom_mask]
+    
+#     results = []
+#     for i in range(n_samples):
+#         try:
+#             # Use assemble function to reconstruct the system
+#             recon_system, recon_slab = assemble(
+#                 generated_prim_slab_coords=sampled_prim_slab_coords[i],
+#                 generated_ads_coords=sampled_ads_coords[i],
+#                 generated_lattice=sampled_lattices[i],
+#                 generated_supercell_matrix=sampled_supercell_matrices[i].reshape(3, 3),
+#                 generated_scaling_factor=sampled_scaling_factors[i],
+#                 prim_slab_atom_types=prim_slab_atom_types,
+#                 ads_atom_types=ads_atom_types,
+#                 prim_slab_atom_mask=prim_slab_atom_mask,
+#                 ads_atom_mask=ads_atom_mask,
+#             )
+            
+#             # Create ads_atoms (adsorbate only, without cell, for energy lookup)
+#             valid_ads_coords = sampled_ads_coords[i][ads_atom_mask]
+#             ads_atoms = Atoms(
+#                 numbers=valid_ads_types,
+#                 positions=valid_ads_coords,
+#             )
+            
+#             # Check structural validity BEFORE relaxation
+#             struct_valid = _structural_validity(recon_system)
+            
+#             if not struct_valid:
+#                 # Skip relaxation for invalid structures
+#                 results.append({
+#                     "E_adsorption": float('nan'),
+#                     "struct_valid": False,
+#                 })
+#                 continue
+            
+#             # Compute adsorption energy with relaxation (suppress LBFGS output)
+#             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+#                 e_ads, e_sys, e_slab, e_adsorbate = relaxation_and_compute_adsorption_energy(
+#                     calc, recon_system, recon_slab, ads_atoms
+#                 )
+            
+#             # Check if calculation succeeded
+#             if e_ads == 999.0 or np.isnan(e_ads):
+#                 results.append({
+#                     "E_adsorption": float('nan'),
+#                     "struct_valid": struct_valid,
+#                 })
+#             else:
+#                 results.append({
+#                     "E_adsorption": float(e_ads),
+#                     "struct_valid": struct_valid,
+#                 })
+                
+#         except Exception as e:
+#             print(f"WARNING: Failed to compute adsorption energy for sample {i}: {e}", file=sys.stderr)
+#             results.append({
+#                 "E_adsorption": float('nan'),
+#                 "struct_valid": False,
+#             })
+    
+#     return results
 
 def smact_validity(structures,
                    use_pauling_test=True,

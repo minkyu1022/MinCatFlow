@@ -6,9 +6,6 @@ _target_: src.module.effcat_module.EffCatModule
 atom_s: 512
 token_s: 512
 
-# De Novo Generation mode
-dng: false  # De Novo Generation mode
-
 # Flow model arguments
 flow_model_args:
   atom_encoder_depth: 6
@@ -20,7 +17,7 @@ flow_model_args:
   atom_decoder_heads: 4
   attention_impl: "pytorch" # "pytorch", "xformers", "manual"
   activation_checkpointing: false
-  dng: ${dng}  # pass to flow model
+  dng: false  # pass to flow model
 
 # Prior sampler arguments
 prior_sampler_args:

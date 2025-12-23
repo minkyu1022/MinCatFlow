@@ -22,8 +22,8 @@ from src.data.prior import CatPriorSampler
 from src.models.loss.validation import (
     find_best_match_rmsd_prim,
     find_best_match_rmsd_slab,
-    compute_adsorption_and_validity_single,
     compute_structural_validity_single,
+    compute_prim_structural_validity_single,
     get_uma_calculator,
 )
 from src.models.loss.utils import stratify_loss_by_time
@@ -66,6 +66,7 @@ class EffCatModule(LightningModule):
         self.val_slab_rmsd = MeanMetric(sync_on_compute=False)
         self.val_adsorption_energy = MeanMetric(sync_on_compute=False)
         self.val_structural_validity = MeanMetric(sync_on_compute=False)
+        self.val_prim_structural_validity = MeanMetric(sync_on_compute=False)
         self.validation_step_outputs = []
         
         # UMA calculator for adsorption energy (lazy initialization)
@@ -375,7 +376,8 @@ class EffCatModule(LightningModule):
             n_samples = self.validation_args["flow_samples"]
             prim_rmsd_tasks = []
             slab_rmsd_tasks = []
-            validity_tasks = []
+            prim_validity_tasks = []
+            slab_validity_tasks = []
             adsorption_tasks = []
 
             # Collate results from all batches
@@ -476,8 +478,19 @@ class EffCatModule(LightningModule):
                             )
                         )
                     
-                    # Structural validity task (always computed, independent of adsorption)
-                    validity_tasks.append(
+                    # Prim structural validity task (primitive slab only)
+                    prim_validity_tasks.append(
+                        (
+                            sampled_prim_slab_coords[i],
+                            sampled_lattices[i],
+                            prim_slab_atom_types[i],
+                            prim_slab_atom_mask[i],
+                            self.matcher_kwargs,
+                        )
+                    )
+                    
+                    # Slab structural validity task (full system after assemble)
+                    slab_validity_tasks.append(
                         (
                             sampled_prim_slab_coords[i],
                             sampled_ads_coords[i],
@@ -604,45 +617,89 @@ class EffCatModule(LightningModule):
                     else:
                         self.val_slab_match_rate.update(0.0)
 
-            # Execute structural validity tasks in parallel (always computed)
-            rank_zero_info(f"| Computing structural validity for {len(validity_tasks)} structures (workers={num_workers})...")
-            validity_results_per_item = []
+            # Execute prim structural validity tasks in parallel (always computed)
+            rank_zero_info(f"| Computing prim structural validity for {len(prim_validity_tasks)} structures (workers={num_workers})...")
+            prim_validity_results_per_item = []
+            with ProcessPool(
+                max_workers=num_workers, context=mp.get_context("spawn")
+            ) as pool:
+                future_map = {
+                    pool.schedule(compute_prim_structural_validity_single, args=(task,)): task
+                    for task in prim_validity_tasks
+                }
+
+                for future in tqdm(
+                    future_map, 
+                    desc="Prim structural validity", 
+                    unit="struct",
+                    total=len(prim_validity_tasks),
+                    leave=False,
+                ):
+                    try:
+                        result = future.result(timeout=timeout_seconds)
+                        prim_validity_results_per_item.append(result)
+                    except PebbleTimeoutError:
+                        future.cancel()
+                        rank_zero_info(
+                            f"| WARNING: A prim structural validity task timed out. Skipping."
+                        )
+                        prim_validity_results_per_item.append([False] * n_samples)
+                    except Exception as e:
+                        future.cancel()
+                        rank_zero_info(
+                            f"| WARNING: A prim validity task failed with an exception: {e}"
+                        )
+                        prim_validity_results_per_item.append([False] * n_samples)
+            
+            rank_zero_info(f"| Prim structural validity computation completed.")
+
+            # Compute prim structural validity rate (always computed)
+            # Count as valid if at least one sample is valid (consistent with prim/slab RMSD)
+            for result_list in prim_validity_results_per_item:
+                if any(result_list):
+                    self.val_prim_structural_validity.update(1.0)
+                else:
+                    self.val_prim_structural_validity.update(0.0)
+
+            # Execute slab structural validity tasks in parallel (always computed)
+            rank_zero_info(f"| Computing slab structural validity for {len(slab_validity_tasks)} structures (workers={num_workers})...")
+            slab_validity_results_per_item = []
             with ProcessPool(
                 max_workers=num_workers, context=mp.get_context("spawn")
             ) as pool:
                 future_map = {
                     pool.schedule(compute_structural_validity_single, args=(task,)): task
-                    for task in validity_tasks
+                    for task in slab_validity_tasks
                 }
 
                 for future in tqdm(
                     future_map, 
-                    desc="Structural validity", 
+                    desc="Slab structural validity", 
                     unit="struct",
-                    total=len(validity_tasks),
+                    total=len(slab_validity_tasks),
                     leave=False,
                 ):
                     try:
                         result = future.result(timeout=timeout_seconds)
-                        validity_results_per_item.append(result)
+                        slab_validity_results_per_item.append(result)
                     except PebbleTimeoutError:
                         future.cancel()
                         rank_zero_info(
-                            f"| WARNING: A structural validity task timed out. Skipping."
+                            f"| WARNING: A slab structural validity task timed out. Skipping."
                         )
-                        validity_results_per_item.append([False] * n_samples)
+                        slab_validity_results_per_item.append([False] * n_samples)
                     except Exception as e:
                         future.cancel()
                         rank_zero_info(
-                            f"| WARNING: A validity task failed with an exception: {e}"
+                            f"| WARNING: A slab validity task failed with an exception: {e}"
                         )
-                        validity_results_per_item.append([False] * n_samples)
+                        slab_validity_results_per_item.append([False] * n_samples)
             
-            rank_zero_info(f"| Structural validity computation completed.")
+            rank_zero_info(f"| Slab structural validity computation completed.")
 
-            # Compute structural validity rate (always computed)
+            # Compute slab structural validity rate (always computed)
             # Count as valid if at least one sample is valid (consistent with prim/slab RMSD)
-            for result_list in validity_results_per_item:
+            for result_list in slab_validity_results_per_item:
                 if any(result_list):
                     self.val_structural_validity.update(1.0)
                 else:
@@ -753,7 +810,14 @@ class EffCatModule(LightningModule):
             else:
                 self.log("val/avg_slab_rmsd", float("nan"), rank_zero_only=True)
             
-            # Log structural validity (always computed, regardless of compute_adsorption)
+            # Log prim structural validity (always computed, regardless of compute_adsorption)
+            self.log(
+                "val/prim_structural_validity_rate",
+                self.val_prim_structural_validity.compute() if self.val_prim_structural_validity.update_count > 0 else float("nan"),
+                rank_zero_only=True,
+            )
+            
+            # Log slab structural validity (always computed, regardless of compute_adsorption)
             self.log(
                 "val/structural_validity_rate",
                 self.val_structural_validity.compute() if self.val_structural_validity.update_count > 0 else float("nan"),
@@ -778,6 +842,7 @@ class EffCatModule(LightningModule):
             self.val_slab_rmsd.reset()
             self.val_adsorption_energy.reset()
             self.val_structural_validity.reset()
+            self.val_prim_structural_validity.reset()
             self.validation_step_outputs.clear()  # free memory
 
     def test_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
