@@ -312,7 +312,7 @@ class EffCatModule(LightningModule):
         )
 
         # Compute losses
-        flow_loss_dict = self.structure_module.compute_loss(
+        flow_loss_dict, check_dict = self.structure_module.compute_loss(
             batch,
             out,
             multiplicity=self.training_args["train_multiplicity"],
@@ -331,8 +331,6 @@ class EffCatModule(LightningModule):
             * flow_loss_dict["angle_loss"].mean()
             + self.training_args["supercell_matrix_loss_weight"]
             * flow_loss_dict["supercell_matrix_loss"].mean()
-            + self.training_args["supercell_matrix_cosine_reg_weight"]
-            * flow_loss_dict["supercell_matrix_cosine_reg"].mean()
             + self.training_args["scaling_factor_loss_weight"]
             * flow_loss_dict["scaling_factor_loss"].mean()
         )
@@ -350,6 +348,15 @@ class EffCatModule(LightningModule):
             self.log(
                 f"{prefix}/{loss_name}",
                 batch_loss.mean(),
+                batch_size=batch_size,
+                sync_dist=sync_dist,
+            )
+        
+        # Check metrics for supercell matrix (not trained)
+        for metric_name, batch_metric in check_dict.items():
+            self.log(
+                f"{prefix}/{metric_name}",
+                batch_metric.mean(),
                 batch_size=batch_size,
                 sync_dist=sync_dist,
             )

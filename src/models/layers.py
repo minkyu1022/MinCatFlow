@@ -12,6 +12,10 @@ from src.models.transformers import DiT, PositionalEmbedder
 # Number of elements for one-hot encoding (covers most elements in periodic table)
 NUM_ELEMENTS = 100
 
+# Discrete Flow Matching constants (for dng=True mode)
+MASK_TOKEN_INDEX = 0  # Mask token index (used as prior in DFM)
+NUM_ELEMENTS_WITH_MASK = NUM_ELEMENTS + 1  # 101 (0=MASK, 1-100=elements)
+
 
 class AtomAttentionEncoder(Module):
     """
@@ -37,11 +41,19 @@ class AtomAttentionEncoder(Module):
         attention_impl,
         positional_encoding=False,
         activation_checkpointing=False,
+        dng: bool = False,
     ):
         super().__init__()
+        
+        self.dng = dng
 
-        # Prim slab features: atom_pad_mask (1) + element one-hot (NUM_ELEMENTS)
-        prim_slab_feature_dim = 1 + NUM_ELEMENTS
+        # Prim slab features: atom_pad_mask (1) + element one-hot
+        # dng=True: includes MASK token (NUM_ELEMENTS_WITH_MASK = 101)
+        # dng=False: no MASK token (NUM_ELEMENTS = 100)
+        if dng:
+            prim_slab_feature_dim = 1 + NUM_ELEMENTS_WITH_MASK  # 102
+        else:
+            prim_slab_feature_dim = 1 + NUM_ELEMENTS  # 101
         self.embed_prim_slab_features = LinearNoBias(prim_slab_feature_dim, atom_s)
         
         # Adsorbate features: ref_pos (3) + atom_pad_mask (1) + bind_atomic_num (1) + element one-hot (NUM_ELEMENTS)
@@ -96,33 +108,36 @@ class AtomAttentionEncoder(Module):
         ads_mask = feats["ads_atom_pad_mask"].bool()
 
         # === Prim slab features ===
-        # Features: atom_pad_mask (1) + element one-hot (NUM_ELEMENTS)
-        # Use prim_slab_element_t (probabilities) when dng=True, convert ref_prim_slab_element to one-hot when dng=False
-        if prim_slab_element_t is not None:
-            # dng=True: prim_slab_element_t is already in (B*mult, N_actual, NUM_ELEMENTS) format as probabilities
-            # Extract actual N from prim_slab_element_t (may differ from feats N during sampling)
-            B_mult, N_actual, _ = prim_slab_element_t.shape
-            B_feats, N_feats, _ = feats["prim_slab_cart_coords"].shape
-            # Also check prim_slab_x_t to ensure consistency
+        # Features: atom_pad_mask (1) + element one-hot
+        # dng=True: prim_slab_element_t is integer tensor (0=MASK, 1-100=elements) → one-hot with MASK
+        # dng=False: use ref_prim_slab_element directly → one-hot without MASK
+        if prim_slab_element_t is not None and self.dng:
+            # dng=True: prim_slab_element_t is integer tensor (B*mult, N_actual)
+            # Values: 0=MASK, 1-100=element atomic numbers
+            B_mult = prim_slab_element_t.shape[0]
+            N_actual = prim_slab_element_t.shape[1]
             B_x, N_x, _ = prim_slab_x_t.shape
             
-            # Ensure N_actual matches prim_slab_x_t (use the smaller one if they differ)
+            # Ensure N_actual matches prim_slab_x_t
             if N_actual != N_x:
                 N_actual = N_x
-                # Slice prim_slab_element_t to match prim_slab_x_t
-                prim_slab_element_onehot = prim_slab_element_t[:, :N_actual, :]  # (B*mult, N_actual, NUM_ELEMENTS)
-            else:
-                prim_slab_element_onehot = prim_slab_element_t  # (B*mult, N_actual, NUM_ELEMENTS) - probabilities
+                prim_slab_element_t = prim_slab_element_t[:, :N_actual]
+            
+            # Convert integer tensor to one-hot with MASK token
+            # prim_slab_element_t: (B*mult, N_actual) integer tensor (0=MASK, 1-100=elements)
+            prim_slab_element_onehot = F.one_hot(
+                prim_slab_element_t.clamp(0, NUM_ELEMENTS_WITH_MASK - 1).long(),
+                num_classes=NUM_ELEMENTS_WITH_MASK
+            ).float()  # (B*mult, N_actual, NUM_ELEMENTS_WITH_MASK)
             
             # mask needs multiplicity applied and sliced to match N_actual
-            prim_slab_mask_for_feats = feats["prim_slab_atom_pad_mask"].repeat_interleave(multiplicity, 0)  # (B*mult, N_feats)
-            # Slice to match actual number of atoms
-            prim_slab_mask_for_feats = prim_slab_mask_for_feats[:, :N_actual]  # (B*mult, N_actual)
+            prim_slab_mask_for_feats = feats["prim_slab_atom_pad_mask"].repeat_interleave(multiplicity, 0)
+            prim_slab_mask_for_feats = prim_slab_mask_for_feats[:, :N_actual]
             
             # Update N to N_actual for later use
             N = N_actual
         else:
-            # dng=False: existing approach
+            # dng=False: existing approach (no MASK token)
             prim_slab_element_onehot = F.one_hot(
                 feats["ref_prim_slab_element"].clamp(0, NUM_ELEMENTS - 1), 
                 num_classes=NUM_ELEMENTS
@@ -136,8 +151,8 @@ class AtomAttentionEncoder(Module):
         
         c_prim_slab = self.embed_prim_slab_features(prim_slab_feats)  # (B*mult, N, atom_s) or (B, N, atom_s)
         
-        # Apply multiplicity only when dng=False (already applied when dng=True)
-        if prim_slab_element_t is None:
+        # Apply multiplicity only when not in dng mode with prim_slab_element_t
+        if prim_slab_element_t is None or not self.dng:
             # Existing approach: (B, N, atom_s) -> (B*mult, N, atom_s)
             c_prim_slab = c_prim_slab.repeat_interleave(multiplicity, 0)
 

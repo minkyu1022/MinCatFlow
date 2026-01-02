@@ -323,13 +323,13 @@ def _struct_comp_validity(atoms: Atoms) -> bool:
     except Exception as e:
         dist_ok = False
     
-    # 3. Check min width of cell (a, b axes)
-    min_ab = 8.0
+    # # 3. Check min width of cell (a, b axes)
+    # min_ab = 8.0
     
-    a_length = np.linalg.norm(atoms.cell[0])
-    b_length = np.linalg.norm(atoms.cell[1])
+    # a_length = np.linalg.norm(atoms.cell[0])
+    # b_length = np.linalg.norm(atoms.cell[1])
     
-    width_ok = a_length >= min_ab and b_length >= min_ab
+    # width_ok = a_length >= min_ab and b_length >= min_ab
     
     # 4. Check min height of cell (c projected onto normal of a×b plane)
     min_height = 20.0
@@ -352,7 +352,7 @@ def _struct_comp_validity(atoms: Atoms) -> bool:
         height_ok = proj_height >= min_height
 
     # 5. Basic validity check
-    basic_valid = bool(vol_ok and dist_ok and width_ok and height_ok)
+    basic_valid = bool(vol_ok and dist_ok and height_ok)
     
     if not basic_valid:
         return False

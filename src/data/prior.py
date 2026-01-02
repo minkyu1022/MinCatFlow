@@ -124,9 +124,13 @@ class CatPriorSampler:
         # Combine into lattice_0: (a, b, c, alpha, beta, gamma)
         lattice_0 = torch.cat([lengths_0, angles_0], dim=-1)  # (B, 6)
 
-        # Sample supercell matrix from standard normal N(0, 1) in normalized space, then denormalize to raw space
-        supercell_matrix_0_normalized = torch.randn(batch_size, 3, 3, device=device, dtype=dtype)  # (B, 3, 3)
-        supercell_matrix_0 = self.denormalize_supercell(supercell_matrix_0_normalized)  # (B, 3, 3) raw space
+        # # Sample supercell matrix from standard normal N(0, 1) in normalized space, then denormalize to raw space
+        # supercell_matrix_0_normalized = torch.randn(batch_size, 3, 3, device=device, dtype=dtype)  # (B, 3, 3)
+        # supercell_matrix_0 = self.denormalize_supercell(supercell_matrix_0_normalized)  # (B, 3, 3) raw space
+        
+        identity = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
+        noise = torch.randn(batch_size, 3, 3, device=device, dtype=dtype) * 0.1
+        supercell_matrix_0 = identity + noise
 
         # Sample scaling factor from Gaussian N(0, coord_std^2) - no normalization
         scaling_factor_0 = torch.randn(batch_size, device=device, dtype=dtype) * self.coord_std  # (B,)

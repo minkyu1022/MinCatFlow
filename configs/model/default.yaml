@@ -3,18 +3,18 @@
 _target_: src.module.effcat_module.EffCatModule
 
 # Model architecture dimensions
-atom_s: 512
-token_s: 512
+atom_s: 768
+token_s: 768
 
 # Flow model arguments
 flow_model_args:
   atom_encoder_depth: 6
-  atom_encoder_heads: 4
+  atom_encoder_heads: 12
   atom_encoder_positional_encoding: false  # positional encoding not used
   token_transformer_depth: 12
-  token_transformer_heads: 8
+  token_transformer_heads: 12
   atom_decoder_depth: 6
-  atom_decoder_heads: 4
+  atom_decoder_heads: 12
   attention_impl: "pytorch" # "pytorch", "xformers", "manual"
   activation_checkpointing: false
   dng: true  # pass to flow model
@@ -66,7 +66,7 @@ training_args:
   supercell_matrix_loss_weight: 1.0  # supercell matrix loss weight
   supercell_matrix_cosine_reg_weight: 0.0  # cosine regularization weight for integer supercell matrix
   scaling_factor_loss_weight: 1.0  # scaling factor loss weight
-  prim_slab_element_loss_weight: 10.0  # Used when dng=True
+  prim_slab_element_loss_weight: 5.0  # Used when dng=True
   lr: 1e-4
   weight_decay: 0.0
 
@@ -96,7 +96,7 @@ predict_args:
   num_samples: 1
   sampling_steps: 50
   sampling_center_coords: false
-  refine_final: true
+  refine_final: false
 
 # Use optimized kernels
 use_kernels: false

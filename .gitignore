@@ -113,6 +113,7 @@ outputs/
 *.pkl
 
 unrelaxed_samples/
+energies/
 *.cif
 *.traj
 *.json

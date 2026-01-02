@@ -153,9 +153,14 @@ def assemble(
         coords_are_cartesian=True
     )
     
-    # # Check and convert supercell matrix shape
-    # supercell_matrix = np.round(generated_supercell_matrix).astype(int)
-    supercell_matrix = generated_supercell_matrix
+    # Check and convert supercell matrix shape
+    # pymatgen requires integer supercell matrices, so we round float values
+    # before converting to int. Without rounding, small float values (e.g., 0.92490554)
+    # would be truncated to 0 during int conversion, making the matrix singular.
+    if generated_supercell_matrix.shape == (9,):
+        supercell_matrix = np.round(generated_supercell_matrix.reshape(3, 3)).astype(int)
+    else:
+        supercell_matrix = np.round(generated_supercell_matrix).astype(int)
     
     # Create supercell
     supercell_slab_struct = prim_slab_struct.copy()
