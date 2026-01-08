@@ -23,11 +23,16 @@ class AtomAttentionEncoder(Module):
     
     Input:
         - prim_slab_x_t: (B, N, 3) noisy prim_slab coordinates
-        - ads_x_t: (B, M, 3) noisy adsorbate coordinates
+        - ads_center_t: (B, 3) noisy adsorbate center (center of mass)
+        - ads_rel_pos_t: (B, M, 3) noisy adsorbate relative positions from center
         - l_t: (B, 6) noisy lattice parameters
         - sm_t: (B, 3, 3) noisy supercell matrix (normalized)
+        - sf_t: (B,) noisy scaling factor
         - t: timesteps
         - feats: dictionary containing ref_prim_slab_element, ref_ads_element, masks, etc.
+    
+    Note:
+        Internally reconstructs ads_x_t = ads_center_t + ads_rel_pos_t for position embedding.
     
     Output:
         - joint representation: (B, N+M, atom_s)
@@ -87,11 +92,12 @@ class AtomAttentionEncoder(Module):
             use_energy_cond=use_energy_cond,
         )
 
-    def forward(self, prim_slab_x_t, ads_x_t, l_t, sm_t, sf_t, t, feats, multiplicity=1, prim_slab_element_t: Optional[torch.Tensor] = None):
+    def forward(self, prim_slab_x_t, ads_center_t, ads_rel_pos_t, l_t, sm_t, sf_t, t, feats, multiplicity=1, prim_slab_element_t: Optional[torch.Tensor] = None):
         """
         Args:
             prim_slab_x_t: (B*mult, N, 3) noisy prim_slab coordinates
-            ads_x_t: (B*mult, M, 3) noisy adsorbate coordinates
+            ads_center_t: (B*mult, 3) noisy adsorbate center
+            ads_rel_pos_t: (B*mult, M, 3) noisy adsorbate relative positions
             l_t: (B*mult, 6) noisy lattice parameters
             sm_t: (B*mult, 3, 3) noisy supercell matrix (normalized)
             sf_t: (B*mult,) noisy scaling factor (normalized)
@@ -158,7 +164,7 @@ class AtomAttentionEncoder(Module):
         if prim_slab_element_t is None or not self.dng:
             # Existing approach: (B, N, atom_s) -> (B*mult, N, atom_s)
             c_prim_slab = c_prim_slab.repeat_interleave(multiplicity, 0)
-
+        
         # === Adsorbate features ===
         # Features: atom_pad_mask (1) + element one-hot (NUM_ELEMENTS)
         ads_element_onehot = F.one_hot(
@@ -170,15 +176,16 @@ class AtomAttentionEncoder(Module):
         ads_mask_float = feats["ads_atom_pad_mask"]  # (B, M)
         
         from src.models.utils import center_random_augmentation
-        ref_ads_augmented = center_random_augmentation(
+        ref_ads_pos_augmented = center_random_augmentation(
             ref_ads_pos,
             ads_mask_float,
+            s_trans=0.0,
             augmentation=True,
             centering=True,
         )  # (B, M, 3)
         
         ads_feats = torch.cat([
-            ref_ads_augmented,  # (B, M, 3) - augmented reference positions
+            ref_ads_pos_augmented,  # (B, M, 3) - reference positions
             feats["ads_atom_pad_mask"].unsqueeze(-1),  # (B, M, 1)
             ads_element_onehot,  # (B, M, NUM_ELEMENTS)
         ], dim=-1)
@@ -196,6 +203,9 @@ class AtomAttentionEncoder(Module):
         q = c
 
         # === Add noisy positions ===
+        # Reconstruct absolute adsorbate coordinates: ads_x_t = ads_center_t + ads_rel_pos_t
+        ads_x_t = ads_center_t.unsqueeze(1) + ads_rel_pos_t  # (B*mult, M, 3)
+        
         # Concat noisy coords: prim_slab_x_t (B*mult, N, 3) + ads_x_t (B*mult, M, 3)
         # Ensure prim_slab_x_t matches N (may need slicing if N was updated)
         if prim_slab_x_t.shape[1] != N:
@@ -229,7 +239,7 @@ class AtomAttentionEncoder(Module):
 
 class AtomAttentionDecoder(Module):
     """
-    Decoder that outputs predictions for prim_slab coords, adsorbate coords, lattice, and supercell matrix.
+    Decoder that outputs predictions for prim_slab coords, adsorbate center, adsorbate relative positions, lattice, and supercell matrix.
     
     Input:
         - x: (B, N+M, atom_s) joint atom representations
@@ -237,7 +247,8 @@ class AtomAttentionDecoder(Module):
     
     Output:
         - prim_slab_r_update: (B, N, 3) prim_slab coordinate updates
-        - ads_r_update: (B, M, 3) adsorbate coordinate updates
+        - ads_center_update: (B, 3) adsorbate center updates
+        - ads_rel_pos_update: (B, M, 3) adsorbate relative position updates
         - l_update: (B, 6) lattice updates
         - s_update: (B, 3, 3) supercell matrix updates (normalized)
     """
@@ -268,8 +279,13 @@ class AtomAttentionDecoder(Module):
             nn.LayerNorm(atom_s), LinearNoBias(atom_s, 3)
         )
         
-        # Projection heads for adsorbate coords
-        self.feats_to_ads_coords = nn.Sequential(
+        # Projection head for adsorbate center (global pooling -> 3D center)
+        self.feats_to_ads_center = nn.Sequential(
+            nn.LayerNorm(atom_s), LinearNoBias(atom_s, 3)
+        )
+        
+        # Projection heads for adsorbate relative positions (per-atom)
+        self.feats_to_ads_rel_pos = nn.Sequential(
             nn.LayerNorm(atom_s), LinearNoBias(atom_s, 3)
         )
 
@@ -308,7 +324,8 @@ class AtomAttentionDecoder(Module):
         
         Returns:
             prim_slab_r_update: (B*mult, N, 3) prim_slab coordinate updates
-            ads_r_update: (B*mult, M, 3) adsorbate coordinate updates
+            ads_center_update: (B*mult, 3) adsorbate center updates
+            ads_rel_pos_update: (B*mult, M, 3) adsorbate relative position updates
             l_update: (B*mult, 6) lattice updates
             sm_update: (B*mult, 3, 3) supercell matrix updates (normalized)
             sf_update: (B*mult,) scaling factor updates (normalized)
@@ -335,10 +352,15 @@ class AtomAttentionDecoder(Module):
         # Prim slab position prediction
         prim_slab_r_update = self.feats_to_prim_slab_coords(x_prim_slab)
 
-        # Adsorbate position prediction
-        ads_r_update = self.feats_to_ads_coords(x_ads)
+        # Adsorbate center prediction (global pooling over adsorbate atoms)
+        num_ads_atoms = ads_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
+        x_ads_global = torch.sum(x_ads * ads_mask[..., None], dim=1) / (num_ads_atoms + 1e-8)  # (B*mult, atom_s)
+        ads_center_update = self.feats_to_ads_center(x_ads_global)  # (B*mult, 3)
+        
+        # Adsorbate relative position prediction (per-atom)
+        ads_rel_pos_update = self.feats_to_ads_rel_pos(x_ads)  # (B*mult, M, 3)
 
-        # Global pooling (use prim_slab atoms only)
+        # Global pooling (use prim_slab atoms only) for lattice/supercell/scaling_factor
         num_prim_slab_atoms = prim_slab_mask.sum(dim=1, keepdim=True)  # (B*mult, 1)
         x_global = torch.sum(x_prim_slab * prim_slab_mask[..., None], dim=1) / (num_prim_slab_atoms + 1e-8)
 
@@ -356,9 +378,9 @@ class AtomAttentionDecoder(Module):
         if hasattr(self, 'feats_to_prim_slab_element'):
             prim_slab_element_update = self.feats_to_prim_slab_element(x_prim_slab)
             # (B*mult, N, NUM_ELEMENTS) - logits format (softmax is applied during loss/vector field computation)
-            return prim_slab_r_update, ads_r_update, l_update, sm_update, sf_update, prim_slab_element_update
+            return prim_slab_r_update, ads_center_update, ads_rel_pos_update, l_update, sm_update, sf_update, prim_slab_element_update
         else:
-            return prim_slab_r_update, ads_r_update, l_update, sm_update, sf_update
+            return prim_slab_r_update, ads_center_update, ads_rel_pos_update, l_update, sm_update, sf_update
 
 
 class TokenTransformer(Module):

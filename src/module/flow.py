@@ -101,13 +101,14 @@ class FlowModule(nn.Module):
         atom_feats = torch.bmm(atom_to_token, token_feats)
         return atom_feats
 
-    def forward(self, prim_slab_r_noisy, ads_r_noisy, l_noisy, sm_noisy, sf_noisy, times, feats, multiplicity=1, prim_slab_element_noisy: Optional[torch.Tensor] = None):
+    def forward(self, prim_slab_r_noisy, ads_center_noisy, ads_rel_pos_noisy, l_noisy, sm_noisy, sf_noisy, times, feats, multiplicity=1, prim_slab_element_noisy: Optional[torch.Tensor] = None):
         """
         Forward pass through the flow model.
         
         Args:
             prim_slab_r_noisy: (B*mult, N, 3) noisy prim_slab coordinates
-            ads_r_noisy: (B*mult, M, 3) noisy adsorbate coordinates
+            ads_center_noisy: (B*mult, 3) noisy adsorbate center
+            ads_rel_pos_noisy: (B*mult, M, 3) noisy adsorbate relative positions
             l_noisy: (B*mult, 6) noisy lattice parameters
             sm_noisy: (B*mult, 3, 3) noisy supercell matrix (normalized)
             sf_noisy: (B*mult,) noisy scaling factor (normalized)
@@ -118,7 +119,8 @@ class FlowModule(nn.Module):
         Returns:
             dict with:
                 - prim_slab_r_update: (B*mult, N, 3)
-                - ads_r_update: (B*mult, M, 3)
+                - ads_center_update: (B*mult, 3)
+                - ads_rel_pos_update: (B*mult, M, 3)
                 - l_update: (B*mult, 6)
                 - sm_update: (B*mult, 3, 3)
                 - sf_update: (B*mult,)
@@ -126,7 +128,8 @@ class FlowModule(nn.Module):
         # Encoder (atom-level attention, joint processing)
         h_atoms, n_prim_slab, n_ads = self.atom_encoder(
             prim_slab_x_t=prim_slab_r_noisy,
-            ads_x_t=ads_r_noisy,
+            ads_center_t=ads_center_noisy,
+            ads_rel_pos_t=ads_rel_pos_noisy,
             l_t=l_noisy,
             sm_t=sm_noisy,
             sf_t=sf_noisy,
@@ -173,24 +176,26 @@ class FlowModule(nn.Module):
 
         # Decoder (atom-level attention, separate output heads)
         if self.dng:
-            prim_slab_r_update, ads_r_update, l_update, sm_update, sf_update, prim_slab_element_update = self.atom_decoder(
+            prim_slab_r_update, ads_center_update, ads_rel_pos_update, l_update, sm_update, sf_update, prim_slab_element_update = self.atom_decoder(
                 x=h_atoms, t=times, feats=feats, n_prim_slab=n_prim_slab, n_ads=n_ads, multiplicity=multiplicity
             )
             return {
                 "prim_slab_r_update": prim_slab_r_update,
-                "ads_r_update": ads_r_update,
+                "ads_center_update": ads_center_update,
+                "ads_rel_pos_update": ads_rel_pos_update,
                 "l_update": l_update,
                 "sm_update": sm_update,
                 "sf_update": sf_update,
                 "prim_slab_element_update": prim_slab_element_update,
             }
         else:
-            prim_slab_r_update, ads_r_update, l_update, sm_update, sf_update = self.atom_decoder(
+            prim_slab_r_update, ads_center_update, ads_rel_pos_update, l_update, sm_update, sf_update = self.atom_decoder(
                 x=h_atoms, t=times, feats=feats, n_prim_slab=n_prim_slab, n_ads=n_ads, multiplicity=multiplicity
             )
             return {
                 "prim_slab_r_update": prim_slab_r_update,
-                "ads_r_update": ads_r_update,
+                "ads_center_update": ads_center_update,
+                "ads_rel_pos_update": ads_rel_pos_update,
                 "l_update": l_update,
                 "sm_update": sm_update,
                 "sf_update": sf_update,
@@ -240,7 +245,8 @@ class AtomFlowMatching(Module):
     def preconditioned_network_forward(
         self,
         noised_prim_slab_coords,
-        noised_ads_coords,
+        noised_ads_center,
+        noised_ads_rel_pos,
         noised_lattice,
         noised_supercell_matrix,  # normalized space
         noised_scaling_factor,  # normalized space
@@ -254,7 +260,8 @@ class AtomFlowMatching(Module):
 
         Args:
             noised_prim_slab_coords: (B, N, 3) noised prim_slab coordinates (raw space, Angstrom)
-            noised_ads_coords: (B, M, 3) noised adsorbate coordinates (raw space, Angstrom)
+            noised_ads_center: (B, 3) noised adsorbate center (raw space, Angstrom)
+            noised_ads_rel_pos: (B, M, 3) noised adsorbate relative positions (raw space, Angstrom)
             noised_lattice: (B, 6) noised lattice parameters (a, b, c in Angstrom, alpha, beta, gamma in degrees)
             noised_supercell_matrix: (B, 3, 3) noised supercell matrix (raw space)
             noised_scaling_factor: (B,) noised scaling factor (raw space)
@@ -264,7 +271,8 @@ class AtomFlowMatching(Module):
 
         Returns:
             denoised_prim_slab_coords: (B, N, 3) denoised prim_slab coordinates (raw space, Angstrom)
-            denoised_ads_coords: (B, M, 3) denoised adsorbate coordinates (raw space, Angstrom)
+            denoised_ads_center: (B, 3) denoised adsorbate center (raw space, Angstrom)
+            denoised_ads_rel_pos: (B, M, 3) denoised adsorbate relative positions (raw space, Angstrom)
             denoised_lattice: (B, 6) denoised lattice parameters (Angstrom, degrees)
             denoised_supercell_matrix: (B, 3, 3) denoised supercell matrix (raw space)
             denoised_scaling_factor: (B,) denoised scaling factor (raw space)
@@ -274,9 +282,10 @@ class AtomFlowMatching(Module):
         if isinstance(time, float):
             time = torch.full((batch,), time, device=device)
 
-        # Standardize prim_slab and ads coordinates using mean/std
+        # Standardize prim_slab coords, ads_center, and ads_rel_pos using mean/std
         prim_slab_r_noisy = self.prior_sampler.normalize_prim_slab_coords(noised_prim_slab_coords)
-        ads_r_noisy = self.prior_sampler.normalize_ads_coords(noised_ads_coords)
+        ads_center_noisy = self.prior_sampler.normalize_ads_center(noised_ads_center)
+        ads_rel_pos_noisy = self.prior_sampler.normalize_ads_rel_pos(noised_ads_rel_pos)
         
         # Lattice: lengths (Angstrom -> nm), angles (degrees -> radians)
         l_noisy = noised_lattice.clone()
@@ -291,7 +300,8 @@ class AtomFlowMatching(Module):
         # Predict (network operates in standardized/normalized space)
         net_out = self.flow_model(
             prim_slab_r_noisy=prim_slab_r_noisy,
-            ads_r_noisy=ads_r_noisy,
+            ads_center_noisy=ads_center_noisy,
+            ads_rel_pos_noisy=ads_rel_pos_noisy,
             l_noisy=l_noisy,
             sm_noisy=sm_noisy,
             sf_noisy=sf_noisy,
@@ -300,9 +310,10 @@ class AtomFlowMatching(Module):
             **network_condition_kwargs,
         )
 
-        # Destandardize prim_slab and ads coordinates back to Angstrom
+        # Destandardize prim_slab coords, ads_center, and ads_rel_pos back to Angstrom
         denoised_prim_slab_coords = self.prior_sampler.denormalize_prim_slab_coords(net_out["prim_slab_r_update"])
-        denoised_ads_coords = self.prior_sampler.denormalize_ads_coords(net_out["ads_r_update"])
+        denoised_ads_center = self.prior_sampler.denormalize_ads_center(net_out["ads_center_update"])
+        denoised_ads_rel_pos = self.prior_sampler.denormalize_ads_rel_pos(net_out["ads_rel_pos_update"])
         
         # Lattice: lengths (nm -> Angstrom), angles (radians -> degrees)
         denoised_lattice = net_out["l_update"].clone()
@@ -317,9 +328,9 @@ class AtomFlowMatching(Module):
         # Return element when dng=True (logits format)
         if self.dng:
             denoised_prim_slab_element = net_out.get("prim_slab_element_update")
-            return denoised_prim_slab_coords, denoised_ads_coords, denoised_lattice, denoised_supercell_matrix, denoised_scaling_factor, denoised_prim_slab_element
+            return denoised_prim_slab_coords, denoised_ads_center, denoised_ads_rel_pos, denoised_lattice, denoised_supercell_matrix, denoised_scaling_factor, denoised_prim_slab_element
         else:
-            return denoised_prim_slab_coords, denoised_ads_coords, denoised_lattice, denoised_supercell_matrix, denoised_scaling_factor
+            return denoised_prim_slab_coords, denoised_ads_center, denoised_ads_rel_pos, denoised_lattice, denoised_supercell_matrix, denoised_scaling_factor
 
     def forward(self, feats, multiplicity=1, **kwargs):
         """Flow matching training step.
@@ -327,7 +338,8 @@ class AtomFlowMatching(Module):
         Args:
             feats: Dictionary containing:
                 - prim_slab_cart_coords: (B, N, 3) target prim_slab coordinates
-                - ads_cart_coords: (B, M, 3) target adsorbate coordinates
+                - ads_center: (B, 3) target adsorbate center
+                - ads_rel_pos: (B, M, 3) target adsorbate relative positions
                 - lattice: (B, 6) target lattice parameters (a, b, c, alpha, beta, gamma)
                 - supercell_matrix: (B, 3, 3) target supercell matrix
                 - scaling_factor: (B,) target scaling factor
@@ -340,7 +352,7 @@ class AtomFlowMatching(Module):
         """
         batch_size = feats["prim_slab_cart_coords"].shape[0]
         num_prim_slab_atoms = feats["prim_slab_cart_coords"].shape[1]
-        num_ads_atoms = feats["ads_cart_coords"].shape[1]
+        num_ads_atoms = feats["ads_rel_pos"].shape[1]
         prim_slab_mask = feats["prim_slab_atom_pad_mask"]
         ads_mask = feats["ads_atom_pad_mask"]
 
@@ -352,23 +364,25 @@ class AtomFlowMatching(Module):
         else:
             times = torch.rand(batch_size * multiplicity, device=self.device)
 
-        # Sample prior (prim_slab_coords_0, ads_coords_0, lattice_0, supercell_matrix_0, scaling_factor_0) from prior_sampler
+        # Sample prior (prim_slab_coords_0, ads_center_0, ads_rel_pos_0, lattice_0, supercell_matrix_0, scaling_factor_0) from prior_sampler
         sampler_data = {
             "prim_slab_cart_coords": feats["prim_slab_cart_coords"].repeat_interleave(multiplicity, 0),
             "prim_slab_atom_mask": prim_slab_mask.repeat_interleave(multiplicity, 0),
-            "ads_cart_coords": feats["ads_cart_coords"].repeat_interleave(multiplicity, 0),
+            "ads_rel_pos": feats["ads_rel_pos"].repeat_interleave(multiplicity, 0),
             "ads_atom_mask": ads_mask.repeat_interleave(multiplicity, 0),
         }
         priors = self.prior_sampler.sample(sampler_data)
         prim_slab_coords_0 = priors["prim_slab_coords_0"]  # (B * multiplicity, N, 3) raw space
-        ads_coords_0 = priors["ads_coords_0"]  # (B * multiplicity, M, 3) raw space
+        ads_center_0 = priors["ads_center_0"]  # (B * multiplicity, 3) raw space
+        ads_rel_pos_0 = priors["ads_rel_pos_0"]  # (B * multiplicity, M, 3) raw space
         lattice_0 = priors["lattice_0"]  # (B * multiplicity, 6) raw space
         supercell_matrix_0 = priors["supercell_matrix_0"]  # (B * multiplicity, 3, 3) raw space
         scaling_factor_0 = priors["scaling_factor_0"]  # (B * multiplicity,) raw space
 
         # Prepare target data
         prim_slab_coords = feats["prim_slab_cart_coords"].repeat_interleave(multiplicity, 0)
-        ads_coords = feats["ads_cart_coords"].repeat_interleave(multiplicity, 0)
+        ads_center = feats["ads_center"].repeat_interleave(multiplicity, 0)  # (B * multiplicity, 3)
+        ads_rel_pos = feats["ads_rel_pos"].repeat_interleave(multiplicity, 0)  # (B * multiplicity, M, 3)
         lattice = feats["lattice"].repeat_interleave(multiplicity, 0)  # (B, 6)
         supercell_matrix = feats["supercell_matrix"].repeat_interleave(multiplicity, 0)  # (B, 3, 3)
         scaling_factor = feats["scaling_factor"].repeat_interleave(multiplicity, 0)  # (B,)
@@ -376,7 +390,8 @@ class AtomFlowMatching(Module):
         # Add noise - interpolate between prior and target (in raw space for all variables)
         # All priors are now in raw space, so interpolation is straightforward
         noised_prim_slab_coords = (1 - times[:, None, None]) * prim_slab_coords_0 + times[:, None, None] * prim_slab_coords
-        noised_ads_coords = (1 - times[:, None, None]) * ads_coords_0 + times[:, None, None] * ads_coords
+        noised_ads_center = (1 - times[:, None]) * ads_center_0 + times[:, None] * ads_center  # (B, 3)
+        noised_ads_rel_pos = (1 - times[:, None, None]) * ads_rel_pos_0 + times[:, None, None] * ads_rel_pos  # (B, M, 3)
         noised_lattice = (1 - times[:, None]) * lattice_0 + times[:, None] * lattice  # (B, 6)
         noised_supercell_matrix = (1 - times[:, None, None]) * supercell_matrix_0 + times[:, None, None] * supercell_matrix  # (B, 3, 3) raw space
         noised_scaling_factor = (1 - times) * scaling_factor_0 + times * scaling_factor  # (B,) raw values
@@ -404,9 +419,10 @@ class AtomFlowMatching(Module):
 
         # Get model prediction
         if self.dng:
-            denoised_prim_slab_coords, denoised_ads_coords, denoised_lattice, denoised_supercell_matrix, denoised_scaling_factor, denoised_prim_slab_element = self.preconditioned_network_forward(
+            denoised_prim_slab_coords, denoised_ads_center, denoised_ads_rel_pos, denoised_lattice, denoised_supercell_matrix, denoised_scaling_factor, denoised_prim_slab_element = self.preconditioned_network_forward(
                 noised_prim_slab_coords,
-                noised_ads_coords,
+                noised_ads_center,
+                noised_ads_rel_pos,
                 noised_lattice,
                 noised_supercell_matrix,
                 noised_scaling_factor,
@@ -418,9 +434,10 @@ class AtomFlowMatching(Module):
                 noised_prim_slab_element=noised_prim_slab_element,
             )
         else:
-            denoised_prim_slab_coords, denoised_ads_coords, denoised_lattice, denoised_supercell_matrix, denoised_scaling_factor = self.preconditioned_network_forward(
+            denoised_prim_slab_coords, denoised_ads_center, denoised_ads_rel_pos, denoised_lattice, denoised_supercell_matrix, denoised_scaling_factor = self.preconditioned_network_forward(
                 noised_prim_slab_coords,
-                noised_ads_coords,
+                noised_ads_center,
+                noised_ads_rel_pos,
                 noised_lattice,
                 noised_supercell_matrix,
                 noised_scaling_factor,
@@ -433,18 +450,21 @@ class AtomFlowMatching(Module):
 
         out_dict = dict(
             denoised_prim_slab_coords=denoised_prim_slab_coords,  # raw space (Angstrom)
-            denoised_ads_coords=denoised_ads_coords,  # raw space (Angstrom)
+            denoised_ads_center=denoised_ads_center,  # raw space (Angstrom)
+            denoised_ads_rel_pos=denoised_ads_rel_pos,  # raw space (Angstrom)
             denoised_lattice=denoised_lattice,  # raw space (Angstrom, degrees)
             denoised_supercell_matrix=denoised_supercell_matrix,  # raw space
             denoised_scaling_factor=denoised_scaling_factor,  # raw space
             times=times,
             aligned_true_prim_slab_coords=prim_slab_coords,  # raw space (Angstrom)
-            aligned_true_ads_coords=ads_coords,  # raw space (Angstrom)
+            aligned_true_ads_center=ads_center,  # raw space (Angstrom)
+            aligned_true_ads_rel_pos=ads_rel_pos,  # raw space (Angstrom)
             aligned_true_lattice=lattice,  # raw space (Angstrom, degrees)
             aligned_true_supercell_matrix=supercell_matrix,  # raw space
             aligned_true_scaling_factor=scaling_factor,  # raw space
             noised_prim_slab_coords=noised_prim_slab_coords,  # raw space (for v_loss)
-            noised_ads_coords=noised_ads_coords,  # raw space (for v_loss)
+            noised_ads_center=noised_ads_center,  # raw space (for v_loss)
+            noised_ads_rel_pos=noised_ads_rel_pos,  # raw space (for v_loss)
             noised_lattice=noised_lattice,  # raw space (for v_loss)
             noised_supercell_matrix=noised_supercell_matrix,  # raw space (for v_loss)
             noised_scaling_factor=noised_scaling_factor,  # raw space (for v_loss)
@@ -458,7 +478,7 @@ class AtomFlowMatching(Module):
         return out_dict
 
     def compute_loss(self, feats, out_dict, multiplicity=1, loss_type: str = "l2", flow_loss_type: str = "v_loss") -> tuple[dict, dict]:
-        """Compute losses for prim_slab coords, adsorbate coords, lattice, supercell matrix, and scaling factor.
+        """Compute losses for prim_slab coords, adsorbate center, adsorbate relative positions, lattice, supercell matrix, and scaling factor.
 
         Args:
             feats: Input features dictionary
@@ -470,7 +490,8 @@ class AtomFlowMatching(Module):
         Returns:
             Dictionary with per-sample losses:
                 - prim_slab_coord_loss: (B * multiplicity,) prim_slab coordinate loss
-                - ads_coord_loss: (B * multiplicity,) adsorbate coordinate loss
+                - ads_center_loss: (B * multiplicity,) adsorbate center loss
+                - ads_rel_pos_loss: (B * multiplicity,) adsorbate relative position loss
                 - length_loss: (B * multiplicity,) lattice lengths loss (a, b, c)
                 - angle_loss: (B * multiplicity,) lattice angles loss (alpha, beta, gamma)
                 - supercell_matrix_loss: (B * multiplicity,) supercell matrix loss
@@ -495,8 +516,10 @@ class AtomFlowMatching(Module):
             # Standard x_1 prediction loss
             true_prim_slab = out_dict["aligned_true_prim_slab_coords"]
             pred_prim_slab = out_dict["denoised_prim_slab_coords"]
-            true_ads = out_dict["aligned_true_ads_coords"]
-            pred_ads = out_dict["denoised_ads_coords"]
+            true_ads_center = out_dict["aligned_true_ads_center"]
+            pred_ads_center = out_dict["denoised_ads_center"]
+            true_ads_rel_pos = out_dict["aligned_true_ads_rel_pos"]
+            pred_ads_rel_pos = out_dict["denoised_ads_rel_pos"]
             true_lattice = out_dict["aligned_true_lattice"]
             pred_lattice = out_dict["denoised_lattice"]
             true_supercell_matrix = out_dict["aligned_true_supercell_matrix"]
@@ -510,14 +533,16 @@ class AtomFlowMatching(Module):
             
             # True velocity
             true_prim_slab = (out_dict["aligned_true_prim_slab_coords"] - out_dict["noised_prim_slab_coords"]) / (1 - times[:, None, None] + eps)
-            true_ads = (out_dict["aligned_true_ads_coords"] - out_dict["noised_ads_coords"]) / (1 - times[:, None, None] + eps)
+            true_ads_center = (out_dict["aligned_true_ads_center"] - out_dict["noised_ads_center"]) / (1 - times[:, None] + eps)
+            true_ads_rel_pos = (out_dict["aligned_true_ads_rel_pos"] - out_dict["noised_ads_rel_pos"]) / (1 - times[:, None, None] + eps)
             true_lattice = (out_dict["aligned_true_lattice"] - out_dict["noised_lattice"]) / (1 - times[:, None] + eps)
             true_supercell_matrix = (out_dict["aligned_true_supercell_matrix"] - out_dict["noised_supercell_matrix"]) / (1 - times[:, None, None] + eps)
             true_scaling_factor = (out_dict["aligned_true_scaling_factor"] - out_dict["noised_scaling_factor"]) / (1 - times + eps)
             
             # Predicted velocity
             pred_prim_slab = (out_dict["denoised_prim_slab_coords"] - out_dict["noised_prim_slab_coords"]) / (1 - times[:, None, None] + eps)
-            pred_ads = (out_dict["denoised_ads_coords"] - out_dict["noised_ads_coords"]) / (1 - times[:, None, None] + eps)
+            pred_ads_center = (out_dict["denoised_ads_center"] - out_dict["noised_ads_center"]) / (1 - times[:, None] + eps)
+            pred_ads_rel_pos = (out_dict["denoised_ads_rel_pos"] - out_dict["noised_ads_rel_pos"]) / (1 - times[:, None, None] + eps)
             pred_lattice = (out_dict["denoised_lattice"] - out_dict["noised_lattice"]) / (1 - times[:, None] + eps)
             pred_supercell_matrix = (out_dict["denoised_supercell_matrix"] - out_dict["noised_supercell_matrix"]) / (1 - times[:, None, None] + eps)
             pred_scaling_factor = (out_dict["denoised_scaling_factor"] - out_dict["noised_scaling_factor"]) / (1 - times + eps)
@@ -530,13 +555,13 @@ class AtomFlowMatching(Module):
             prim_slab_mask.sum(dim=1) + 1e-8
         )
 
-        # Loss for adsorbate Cartesian coordinates (raw space)
-        ads_coord_loss = loss_fn(pred_ads, true_ads, reduction="none")
-        # Handle case where all adsorbate atoms are masked (no adsorbate)
+        # Loss for adsorbate center (raw space)
+        ads_center_loss = loss_fn(pred_ads_center, true_ads_center, reduction="none").mean(dim=1)
+        
+        # Loss for adsorbate relative positions (raw space)
+        ads_rel_pos_loss = loss_fn(pred_ads_rel_pos, true_ads_rel_pos, reduction="none")
         ads_mask_sum = ads_mask.sum(dim=1)
-        ads_coord_loss = (ads_coord_loss * ads_mask[..., None]).sum(dim=(1, 2)) / (ads_mask_sum + 1e-8)
-        # Set loss to 0 for samples with no adsorbate
-        ads_coord_loss = torch.where(ads_mask_sum > 0, ads_coord_loss, torch.zeros_like(ads_coord_loss))
+        ads_rel_pos_loss = (ads_rel_pos_loss * ads_mask[..., None]).sum(dim=(1, 2)) / (ads_mask_sum + 1e-8)
 
         # Loss for lattice (6-dimensional: a, b, c, alpha, beta, gamma) in raw space
         # Separate loss for lengths (a, b, c) and angles (alpha, beta, gamma)
@@ -560,7 +585,8 @@ class AtomFlowMatching(Module):
         loss_dict = {
             # Per-sample losses of shape (batch_size * multiplicity,)
             "prim_slab_coord_loss": prim_slab_coord_loss,
-            "ads_coord_loss": ads_coord_loss,
+            "ads_center_loss": ads_center_loss,
+            "ads_rel_pos_loss": ads_rel_pos_loss,
             "length_loss": length_loss,
             "angle_loss": angle_loss,
             "supercell_matrix_loss": supercell_loss,
@@ -623,7 +649,7 @@ class AtomFlowMatching(Module):
         **network_condition_kwargs,
     ):
         """
-        Performs sampling from the learned flow ODE for prim_slab coords, adsorbate coords, lattice, supercell matrix, and scaling factor.
+        Performs sampling from the learned flow ODE for prim_slab coords, adsorbate center, adsorbate relative positions, lattice, supercell matrix, and scaling factor.
 
         Parameters
         ----------
@@ -647,7 +673,7 @@ class AtomFlowMatching(Module):
         Returns
         -------
         dict
-            Dictionary containing sampled prim_slab coords, adsorbate coords, lattice, supercell matrix, and scaling factor.
+            Dictionary containing sampled prim_slab coords, adsorbate coords (center + rel_pos), lattice, supercell matrix, and scaling factor.
         """
         ### Setup and initialize
         num_steps = default(num_sampling_steps, self.num_sampling_steps)
@@ -678,14 +704,15 @@ class AtomFlowMatching(Module):
         sampler_data = {
             "prim_slab_cart_coords": torch.zeros((batch_size, num_prim_slab_atoms, 3), device=self.device),
             "prim_slab_atom_mask": prim_slab_atom_mask,
-            "ads_cart_coords": torch.zeros((batch_size, num_ads_atoms, 3), device=self.device),
+            "ads_rel_pos": torch.zeros((batch_size, num_ads_atoms, 3), device=self.device),
             "ads_atom_mask": ads_atom_mask,
         }
 
         # Initialize from the prior sampler at t=0 (all priors are already in raw space)
         priors = self.prior_sampler.sample(sampler_data)
         prim_slab_coords_t = priors["prim_slab_coords_0"] * prim_slab_atom_mask.unsqueeze(-1)
-        ads_coords_t = priors["ads_coords_0"] * ads_atom_mask.unsqueeze(-1)
+        ads_center_t = priors["ads_center_0"]  # (B, 3)
+        ads_rel_pos_t = priors["ads_rel_pos_0"] * ads_atom_mask.unsqueeze(-1)  # (B, M, 3)
         lattice_t = priors["lattice_0"]
         supercell_matrix_t = priors["supercell_matrix_0"]
         scaling_factor_t = priors["scaling_factor_0"]
@@ -702,11 +729,20 @@ class AtomFlowMatching(Module):
             prim_slab_element_t = None
 
         # Initialize lists to store trajectories if requested
-        prim_slab_coord_trajectory = [prim_slab_coords_t] if return_trajectory else None
-        ads_coord_trajectory = [ads_coords_t] if return_trajectory else None
-        lattice_trajectory = [lattice_t] if return_trajectory else None
-        supercell_matrix_trajectory = [supercell_matrix_t] if return_trajectory else None
-        scaling_factor_trajectory = [scaling_factor_t] if return_trajectory else None
+        # Note: For trajectory, we store ads_coords = ads_center + ads_rel_pos
+        if return_trajectory:
+            ads_coords_t_for_traj = ads_center_t.unsqueeze(1) + ads_rel_pos_t
+            prim_slab_coord_trajectory = [prim_slab_coords_t]
+            ads_coord_trajectory = [ads_coords_t_for_traj]
+            lattice_trajectory = [lattice_t]
+            supercell_matrix_trajectory = [supercell_matrix_t]
+            scaling_factor_trajectory = [scaling_factor_t]
+        else:
+            prim_slab_coord_trajectory = None
+            ads_coord_trajectory = None
+            lattice_trajectory = None
+            supercell_matrix_trajectory = None
+            scaling_factor_trajectory = None
 
         ### ODE Solver Loop (Euler's Method)
         for i in range(num_steps):
@@ -715,9 +751,10 @@ class AtomFlowMatching(Module):
 
             # Get the model's prediction for the final state (x_1)
             if self.dng:
-                pred_prim_slab_coords_1, pred_ads_coords_1, pred_lattice_1, pred_supercell_matrix_1, pred_scaling_factor_1, pred_element_1 = self.preconditioned_network_forward(
+                pred_prim_slab_coords_1, pred_ads_center_1, pred_ads_rel_pos_1, pred_lattice_1, pred_supercell_matrix_1, pred_scaling_factor_1, pred_element_1 = self.preconditioned_network_forward(
                     noised_prim_slab_coords=prim_slab_coords_t,
-                    noised_ads_coords=ads_coords_t,
+                    noised_ads_center=ads_center_t,
+                    noised_ads_rel_pos=ads_rel_pos_t,
                     noised_lattice=lattice_t,
                     noised_supercell_matrix=supercell_matrix_t,
                     noised_scaling_factor=scaling_factor_t,
@@ -727,9 +764,10 @@ class AtomFlowMatching(Module):
                     noised_prim_slab_element=prim_slab_element_t,
                 )
             else:
-                pred_prim_slab_coords_1, pred_ads_coords_1, pred_lattice_1, pred_supercell_matrix_1, pred_scaling_factor_1 = self.preconditioned_network_forward(
+                pred_prim_slab_coords_1, pred_ads_center_1, pred_ads_rel_pos_1, pred_lattice_1, pred_supercell_matrix_1, pred_scaling_factor_1 = self.preconditioned_network_forward(
                     noised_prim_slab_coords=prim_slab_coords_t,
-                    noised_ads_coords=ads_coords_t,
+                    noised_ads_center=ads_center_t,
+                    noised_ads_rel_pos=ads_rel_pos_t,
                     noised_lattice=lattice_t,
                     noised_supercell_matrix=supercell_matrix_t,
                     noised_scaling_factor=scaling_factor_t,
@@ -740,7 +778,8 @@ class AtomFlowMatching(Module):
 
             # Calculate the flow (vector field)
             flow_prim_slab_coords = (pred_prim_slab_coords_1 - prim_slab_coords_t) / (1 - t + 1e-6)
-            flow_ads_coords = (pred_ads_coords_1 - ads_coords_t) / (1 - t + 1e-6)
+            flow_ads_center = (pred_ads_center_1 - ads_center_t) / (1 - t + 1e-6)
+            flow_ads_rel_pos = (pred_ads_rel_pos_1 - ads_rel_pos_t) / (1 - t + 1e-6)
             flow_lattice = (pred_lattice_1 - lattice_t) / (1 - t + 1e-6)
             flow_supercell_matrix = (pred_supercell_matrix_1 - supercell_matrix_t) / (1 - t + 1e-6)
             flow_scaling_factor = (pred_scaling_factor_1 - scaling_factor_t) / (1 - t + 1e-6)
@@ -748,7 +787,8 @@ class AtomFlowMatching(Module):
             # Perform one step of Euler's method
             dt = t_next - t
             prim_slab_coords_t = prim_slab_coords_t + flow_prim_slab_coords * dt
-            ads_coords_t = ads_coords_t + flow_ads_coords * dt
+            ads_center_t = ads_center_t + flow_ads_center * dt
+            ads_rel_pos_t = ads_rel_pos_t + flow_ads_rel_pos * dt
             lattice_t = lattice_t + flow_lattice * dt
             supercell_matrix_t = supercell_matrix_t + flow_supercell_matrix * dt
             scaling_factor_t = scaling_factor_t + flow_scaling_factor * dt
@@ -774,33 +814,24 @@ class AtomFlowMatching(Module):
 
             # Ensure padding atoms remain at zero
             prim_slab_coords_t = prim_slab_coords_t * prim_slab_atom_mask.unsqueeze(-1)
-            ads_coords_t = ads_coords_t * ads_atom_mask.unsqueeze(-1)
-
-            # # Center using prim + ads together, then split back
-            # combined_coords = torch.cat([prim_slab_coords_t, ads_coords_t], dim=1)
-            # combined_mask = torch.cat([prim_slab_atom_mask, ads_atom_mask], dim=1)
-            # combined_coords = center_random_augmentation(
-            #     combined_coords, combined_mask, augmentation=False, centering=center_coords
-            # )
-            # prim_slab_coords_t, ads_coords_t = torch.split(
-            #     combined_coords, [num_prim_slab_atoms, num_ads_atoms], dim=1
-            # )
-            # prim_slab_coords_t = prim_slab_coords_t * prim_slab_atom_mask.unsqueeze(-1)
-            # ads_coords_t = ads_coords_t * ads_atom_mask.unsqueeze(-1)
+            ads_rel_pos_t = ads_rel_pos_t * ads_atom_mask.unsqueeze(-1)
 
             # Store the current state if collecting trajectories
+            # Note: For trajectory, we store ads_coords = ads_center + ads_rel_pos
             if return_trajectory:
+                ads_coords_t_for_traj = ads_center_t.unsqueeze(1) + ads_rel_pos_t
                 prim_slab_coord_trajectory.append(prim_slab_coords_t)
-                ads_coord_trajectory.append(ads_coords_t)
+                ads_coord_trajectory.append(ads_coords_t_for_traj)
                 lattice_trajectory.append(lattice_t)
                 supercell_matrix_trajectory.append(supercell_matrix_t)
                 scaling_factor_trajectory.append(scaling_factor_t)
 
         ### Final Refinement Step
         if refine_final:
-            final_prim_slab_coords, final_ads_coords, final_lattice, final_supercell_matrix, final_scaling_factor = self._refine_step(
+            final_prim_slab_coords, final_ads_center, final_ads_rel_pos, final_lattice, final_supercell_matrix, final_scaling_factor = self._refine_step(
                 prim_slab_coords_t=prim_slab_coords_t,
-                ads_coords_t=ads_coords_t,
+                ads_center_t=ads_center_t,
+                ads_rel_pos_t=ads_rel_pos_t,
                 lattice_t=lattice_t,
                 supercell_matrix_t=supercell_matrix_t,
                 scaling_factor_t=scaling_factor_t,
@@ -811,34 +842,28 @@ class AtomFlowMatching(Module):
             )
         else:
             final_prim_slab_coords = prim_slab_coords_t
-            final_ads_coords = ads_coords_t
+            final_ads_center = ads_center_t
+            final_ads_rel_pos = ads_rel_pos_t
             final_lattice = lattice_t
             final_supercell_matrix = supercell_matrix_t
             final_scaling_factor = scaling_factor_t
 
-        # # Center prim + ads together at the end, then split and mask
-        # final_combined_coords = torch.cat([final_prim_slab_coords, final_ads_coords], dim=1)
-        # final_combined_mask = torch.cat([prim_slab_atom_mask, ads_atom_mask], dim=1)
-        # final_combined_coords = center_random_augmentation(
-        #     final_combined_coords, final_combined_mask, augmentation=False, centering=center_coords
-        # )
-        # final_prim_slab_coords, final_ads_coords = torch.split(
-        #     final_combined_coords, [num_prim_slab_atoms, num_ads_atoms], dim=1
-        # )
-        # final_prim_slab_coords = final_prim_slab_coords * prim_slab_atom_mask.unsqueeze(-1)
-        # final_ads_coords = final_ads_coords * ads_atom_mask.unsqueeze(-1)
+        # Post-processing: center ads_rel_pos (subtract mean so that mean becomes zero)
+        # This ensures relative positions are truly centered around the center
+        ads_mask_sum = ads_atom_mask.sum(dim=1, keepdim=True)  # (B, 1)
+        ads_rel_pos_mean = (final_ads_rel_pos * ads_atom_mask.unsqueeze(-1)).sum(dim=1, keepdim=True) / (ads_mask_sum.unsqueeze(-1) + 1e-8)  # (B, 1, 3)
+        final_ads_rel_pos = final_ads_rel_pos - ads_rel_pos_mean  # Center the relative positions
+        final_ads_rel_pos = final_ads_rel_pos * ads_atom_mask.unsqueeze(-1)  # Ensure padding remains zero
 
-        # # Apply refine_sc_mat to final_supercell_matrix (batch processing)
-        # final_supercell_matrix = refine_sc_mat(final_supercell_matrix).to(
-        #     device=final_supercell_matrix.device, 
-        #     dtype=final_supercell_matrix.dtype
-        # )
+        # Combine ads_center + ads_rel_pos to get final ads_coords for compatibility
+        final_ads_coords = final_ads_center.unsqueeze(1) + final_ads_rel_pos  # (B, M, 3)
 
         # All outputs are already in raw space after preconditioned_network_forward
         # Prepare the output dictionary (all in raw space)
+        # Note: We store ads_coords = ads_center + ads_rel_pos for compatibility with downstream code
         output = {
             "sampled_prim_slab_coords": final_prim_slab_coords,  # (batch_size * multiplicity, N, 3) raw space
-            "sampled_ads_coords": final_ads_coords,  # (batch_size * multiplicity, M, 3) raw space
+            "sampled_ads_coords": final_ads_coords,  # (batch_size * multiplicity, M, 3) raw space (ads_center + ads_rel_pos)
             "sampled_lattice": final_lattice,  # (batch_size * multiplicity, 6) raw space (Angstrom, degrees)
             "sampled_supercell_matrix": final_supercell_matrix,  # (batch_size * multiplicity, 3, 3) raw space
             "sampled_scaling_factor": final_scaling_factor,  # (batch_size * multiplicity,) raw value
@@ -862,8 +887,9 @@ class AtomFlowMatching(Module):
             # Only append final refined values if refine_final=True
             # (if refine_final=False, the last step is already in trajectory from the loop)
             if refine_final:
+                final_ads_coords_for_traj = final_ads_center.unsqueeze(1) + final_ads_rel_pos
                 prim_slab_coord_trajectory.append(final_prim_slab_coords)
-                ads_coord_trajectory.append(final_ads_coords)
+                ads_coord_trajectory.append(final_ads_coords_for_traj)
                 lattice_trajectory.append(final_lattice)
                 supercell_matrix_trajectory.append(final_supercell_matrix)
                 scaling_factor_trajectory.append(final_scaling_factor)
@@ -880,7 +906,8 @@ class AtomFlowMatching(Module):
     def _refine_step(
         self,
         prim_slab_coords_t,
-        ads_coords_t,
+        ads_center_t,
+        ads_rel_pos_t,
         lattice_t,
         supercell_matrix_t,
         scaling_factor_t,
@@ -892,25 +919,27 @@ class AtomFlowMatching(Module):
         """
         Performs a final refinement step by feeding the t=1 state through the model once more.
         """
-        pred_prim_slab_coords_1, pred_ads_coords_1, pred_lattice_1, pred_supercell_matrix_1, pred_scaling_factor_1 = self.preconditioned_network_forward(
+        pred_prim_slab_coords_1, pred_ads_center_1, pred_ads_rel_pos_1, pred_lattice_1, pred_supercell_matrix_1, pred_scaling_factor_1 = self.preconditioned_network_forward(
             noised_prim_slab_coords=prim_slab_coords_t,
-            noised_ads_coords=ads_coords_t,
+            noised_ads_center=ads_center_t,
+            noised_ads_rel_pos=ads_rel_pos_t,
             noised_lattice=lattice_t,
             noised_supercell_matrix=supercell_matrix_t,
             noised_scaling_factor=scaling_factor_t,
             time=1.0,
             training=False,
-                network_condition_kwargs=network_condition_kwargs,
+            network_condition_kwargs=network_condition_kwargs,
         )
 
         final_prim_slab_coords = pred_prim_slab_coords_1
-        final_ads_coords = pred_ads_coords_1
+        final_ads_center = pred_ads_center_1
+        final_ads_rel_pos = pred_ads_rel_pos_1
         final_lattice = pred_lattice_1
         final_supercell_matrix = pred_supercell_matrix_1
         final_scaling_factor = pred_scaling_factor_1
 
         # Ensure padding atoms remain at zero
         final_prim_slab_coords = final_prim_slab_coords * prim_slab_atom_mask.unsqueeze(-1)
-        final_ads_coords = final_ads_coords * ads_atom_mask.unsqueeze(-1)
+        final_ads_rel_pos = final_ads_rel_pos * ads_atom_mask.unsqueeze(-1)
 
-        return final_prim_slab_coords, final_ads_coords, final_lattice, final_supercell_matrix, final_scaling_factor
+        return final_prim_slab_coords, final_ads_center, final_ads_rel_pos, final_lattice, final_supercell_matrix, final_scaling_factor

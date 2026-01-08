@@ -118,3 +118,6 @@ energies/
 *.traj
 *.json
 *.csv
+
+ckpts/
+dataset_per_adsorbate/

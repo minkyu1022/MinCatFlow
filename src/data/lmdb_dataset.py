@@ -176,6 +176,9 @@ def collate_fn_with_dynamic_padding(
     n_vacs = []
     ref_energies = []
 
+    ads_center_list = []
+    ads_rel_pos_list = []
+
     for sample in batch:
         # Extract from primitive_slab (ASE.Atoms)
         primitive_slab = sample["primitive_slab"]
@@ -191,7 +194,7 @@ def collate_fn_with_dynamic_padding(
 
         # Extract other fields (LMDB key names: ads_atomic_numbers, ads_pos)
         ads_nums = np.array(sample["ads_atomic_numbers"])
-        ads_pos = np.array(sample["ads_pos"])
+        ads_pos = np.array(sample["ads_pos"]).reshape(-1, 3)
         
         ref_pos = np.array(sample["ref_ads_pos"])
         bind_ads_atom_list.append(sample.get("bind_ads_atom_symbol", 0))
@@ -200,8 +203,19 @@ def collate_fn_with_dynamic_padding(
 
         adsorbate_numbers_list.append(torch.tensor(ads_nums, dtype=torch.long))
         adsorbate_pos_list.append(
-            torch.tensor(ads_pos.reshape(-1, 3), dtype=torch.float)
+            torch.tensor(ads_pos, dtype=torch.float)
         )
+        
+        # Compute ads_center (center of mass) and ads_rel_pos (relative positions)
+        if len(ads_nums) > 0:
+            ads_center = ads_pos.mean(axis=0)  # (3,)
+            ads_rel_pos = ads_pos - ads_center  # (n_ads, 3)
+        else:
+            ads_center = np.zeros(3, dtype=np.float32)
+            ads_rel_pos = np.zeros((0, 3), dtype=np.float32)
+        
+        ads_center_list.append(torch.tensor(ads_center, dtype=torch.float))
+        ads_rel_pos_list.append(torch.tensor(ads_rel_pos, dtype=torch.float))
 
         supercell_matrices.append(
             torch.tensor(sample["supercell_matrix"], dtype=torch.float)
@@ -225,14 +239,15 @@ def collate_fn_with_dynamic_padding(
 
     # Handle adsorbate (may have empty tensors)
     # Ensure at least 1 dimension for adsorbate
+    batch_size = len(batch)
     if all(len(t) == 0 for t in adsorbate_numbers_list):
         # All empty - create dummy tensor with size 1
-        batch_size = len(batch)
         adsorbate_atomic_numbers = torch.full(
             (batch_size, 1), pad_value, dtype=torch.long
         )
         adsorbate_pos = torch.zeros((batch_size, 1, 3), dtype=torch.float)
         ref_ads_pos = torch.zeros((batch_size, 1, 3), dtype=torch.float)
+        ads_rel_pos = torch.zeros((batch_size, 1, 3), dtype=torch.float)
         adsorbate_mask = torch.zeros((batch_size, 1), dtype=torch.bool)
         n_adsorbate_atoms_max = 1
     else:
@@ -241,30 +256,37 @@ def collate_fn_with_dynamic_padding(
         padded_ads_nums = []
         padded_ads_pos = []
         padded_ref_ads_pos = []
-        for nums, pos, ref_pos in zip(adsorbate_numbers_list, adsorbate_pos_list, ref_ads_pos_list):
+        padded_ads_rel_pos = []
+        for nums, pos, ref_pos, rel_pos in zip(adsorbate_numbers_list, adsorbate_pos_list, ref_ads_pos_list, ads_rel_pos_list):
             if len(nums) == 0:
                 padded_ads_nums.append(torch.tensor([pad_value], dtype=torch.long))
                 padded_ads_pos.append(torch.zeros((1, 3), dtype=torch.float))
                 padded_ref_ads_pos.append(torch.zeros((1, 3), dtype=torch.float))
+                padded_ads_rel_pos.append(torch.zeros((1, 3), dtype=torch.float))
             else:
                 padded_ads_nums.append(nums)
                 padded_ads_pos.append(pos)
                 padded_ref_ads_pos.append(ref_pos)
+                padded_ads_rel_pos.append(rel_pos)
 
         adsorbate_atomic_numbers, ads_num_mask = pad_to_max(
             padded_ads_nums, value=pad_value
         )
         adsorbate_pos, _ = pad_to_max(padded_ads_pos, value=0.0)
         ref_ads_pos, _ = pad_to_max(padded_ref_ads_pos, value=0.0)
+        ads_rel_pos, _ = pad_to_max(padded_ads_rel_pos, value=0.0)
 
         # Create proper mask (original empty tensors should be all False)
         n_adsorbate_atoms_max = adsorbate_atomic_numbers.shape[1]
         adsorbate_mask = torch.zeros(
-            (len(batch), n_adsorbate_atoms_max), dtype=torch.bool
+            (batch_size, n_adsorbate_atoms_max), dtype=torch.bool
         )
         for i, nums in enumerate(adsorbate_numbers_list):
             if len(nums) > 0:
                 adsorbate_mask[i, : len(nums)] = True
+    
+    # Stack ads_center (batch_size, 3)
+    ads_center = torch.stack(ads_center_list)
 
     # Create prim_slab mask from padding result
     if isinstance(prim_slab_num_mask, torch.Tensor):
@@ -312,10 +334,12 @@ def collate_fn_with_dynamic_padding(
         "prim_slab_token_pad_mask": prim_slab_mask.float(),  # [B, N] - same as prim_slab_atom_pad_mask
         # Model input fields - Adsorbate
         "ads_cart_coords": adsorbate_pos,  # [B, n_adsorbate_max, 3]
+        "ads_center": ads_center,  # [B, 3] - center of mass of adsorbate atoms
+        "ads_rel_pos": ads_rel_pos,  # [B, n_adsorbate_max, 3] - relative positions from center
         "ref_ads_element": adsorbate_atomic_numbers,  # [B, n_adsorbate_max]
         "ads_atom_pad_mask": adsorbate_mask.float(),  # [B, n_adsorbate_max] - float for masking
         # Token fields for adsorbate (each atom = individual token)
-        "ads_atom_to_token": torch.eye(n_adsorbate_atoms_max).unsqueeze(0).expand(len(batch), -1, -1).clone(),  # [B, M, M] identity
+        "ads_atom_to_token": torch.eye(n_adsorbate_atoms_max).unsqueeze(0).expand(batch_size, -1, -1).clone(),  # [B, M, M] identity
         "ads_token_pad_mask": adsorbate_mask.float(),  # [B, M] - same as ads_atom_pad_mask
         # Scaling factor: (n_vac + n_slab) / n_slab
         "scaling_factor": torch.tensor(scaling_factors, dtype=torch.float),  # [B]
@@ -413,6 +437,19 @@ def collate_pyg_with_dynamic_padding(
     bind_ads_atom_list = [
         d.bind_ads_atom for d in data_list
     ]
+    
+    # Compute ads_center and ads_rel_pos for each sample
+    ads_center_list = []
+    ads_rel_pos_list = []
+    for pos in adsorbate_pos_list:
+        if len(pos) > 0:
+            ads_center = pos.mean(dim=0)  # (3,)
+            ads_rel_pos = pos - ads_center  # (n_ads, 3)
+        else:
+            ads_center = torch.zeros(3, dtype=torch.float)
+            ads_rel_pos = torch.zeros((0, 3), dtype=torch.float)
+        ads_center_list.append(ads_center)
+        ads_rel_pos_list.append(ads_rel_pos)
 
     # Use pad_to_max for prim_slab
     prim_slab_atomic_numbers, prim_slab_num_mask = pad_to_max(
@@ -433,6 +470,7 @@ def collate_pyg_with_dynamic_padding(
         )
         adsorbate_pos = torch.zeros((batch_size, 1, 3), dtype=torch.float)
         ref_ads_pos = torch.zeros((batch_size, 1, 3), dtype=torch.float)
+        ads_rel_pos = torch.zeros((batch_size, 1, 3), dtype=torch.float)
         adsorbate_mask = torch.zeros((batch_size, 1), dtype=torch.bool)
         n_adsorbate_atoms_max = 1
     else:
@@ -440,19 +478,23 @@ def collate_pyg_with_dynamic_padding(
         padded_ads_nums = []
         padded_ads_pos = []
         padded_ref_ads_pos = []
-        for nums, pos, ref_pos in zip(adsorbate_nums_list, adsorbate_pos_list, ref_ads_pos_list):
+        padded_ads_rel_pos = []
+        for nums, pos, ref_pos, rel_pos in zip(adsorbate_nums_list, adsorbate_pos_list, ref_ads_pos_list, ads_rel_pos_list):
             if len(nums) == 0:
                 padded_ads_nums.append(torch.tensor([pad_value], dtype=torch.long))
                 padded_ads_pos.append(torch.zeros((1, 3), dtype=torch.float))
                 padded_ref_ads_pos.append(torch.zeros((1, 3), dtype=torch.float))
+                padded_ads_rel_pos.append(torch.zeros((1, 3), dtype=torch.float))
             else:
                 padded_ads_nums.append(nums)
                 padded_ads_pos.append(pos)
                 padded_ref_ads_pos.append(ref_pos)
+                padded_ads_rel_pos.append(rel_pos)
 
         adsorbate_atomic_numbers, _ = pad_to_max(padded_ads_nums, value=pad_value)
         adsorbate_pos, _ = pad_to_max(padded_ads_pos, value=0.0)
         ref_ads_pos, _ = pad_to_max(padded_ref_ads_pos, value=0.0)
+        ads_rel_pos, _ = pad_to_max(padded_ads_rel_pos, value=0.0)
 
         n_adsorbate_atoms_max = adsorbate_atomic_numbers.shape[1]
         adsorbate_mask = torch.zeros(
@@ -461,6 +503,9 @@ def collate_pyg_with_dynamic_padding(
         for i, nums in enumerate(adsorbate_nums_list):
             if len(nums) > 0:
                 adsorbate_mask[i, : len(nums)] = True
+    
+    # Stack ads_center (batch_size, 3)
+    ads_center = torch.stack(ads_center_list)
 
     n_prim_slab_atoms_max = prim_slab_atomic_numbers.shape[1]
     lattice_params = torch.stack([d.lattice_params for d in data_list])  # [B, 6]
@@ -505,6 +550,8 @@ def collate_pyg_with_dynamic_padding(
         prim_slab_token_pad_mask=prim_slab_mask.float(),  # [B, N] - same as prim_slab_atom_pad_mask
         # Model input fields - Adsorbate
         ads_cart_coords=adsorbate_pos,  # [B, n_adsorbate_max, 3]
+        ads_center=ads_center,  # [B, 3] - center of mass of adsorbate atoms
+        ads_rel_pos=ads_rel_pos,  # [B, n_adsorbate_max, 3] - relative positions from center
         ref_ads_element=adsorbate_atomic_numbers,  # [B, n_adsorbate_max]
         ads_atom_pad_mask=adsorbate_mask.float(),  # [B, n_adsorbate_max] - float for masking
         # Token fields for adsorbate (each atom = individual token)

@@ -24,7 +24,6 @@ from src.models.loss.validation import (
     find_best_match_rmsd_slab,
     compute_structural_validity_single,
     compute_prim_structural_validity_single,
-    get_uma_calculator,
 )
 from src.models.loss.utils import stratify_loss_by_time
 from src.module.flow import AtomFlowMatching
@@ -70,13 +69,9 @@ class EffCatModule(LightningModule):
         self.val_prim_rmsd = MeanMetric(sync_on_compute=False)
         self.val_slab_match_rate = MeanMetric(sync_on_compute=False)
         self.val_slab_rmsd = MeanMetric(sync_on_compute=False)
-        self.val_adsorption_energy = MeanMetric(sync_on_compute=False)
         self.val_structural_validity = MeanMetric(sync_on_compute=False)
         self.val_prim_structural_validity = MeanMetric(sync_on_compute=False)
         self.validation_step_outputs = []
-        
-        # UMA calculator for adsorption energy (lazy initialization)
-        self._uma_calculator = None
 
         # Prior sampler for flow matching
         prior_sampler = CatPriorSampler(**prior_sampler_args)
@@ -247,6 +242,10 @@ class EffCatModule(LightningModule):
                     feats["ads_atom_to_token"] = feats["ads_atom_to_token"].repeat_interleave(multiplicity_flow_sample, 0)
                 if "ads_cart_coords" in feats:
                     feats["ads_cart_coords"] = feats["ads_cart_coords"].repeat_interleave(multiplicity_flow_sample, 0)
+                if "ads_center" in feats:
+                    feats["ads_center"] = feats["ads_center"].repeat_interleave(multiplicity_flow_sample, 0)
+                if "ads_rel_pos" in feats:
+                    feats["ads_rel_pos"] = feats["ads_rel_pos"].repeat_interleave(multiplicity_flow_sample, 0)
                 if "ads_atom_pad_mask" in feats:
                     feats["ads_atom_pad_mask"] = feats["ads_atom_pad_mask"].repeat_interleave(multiplicity_flow_sample, 0)
                 if "ads_token_pad_mask" in feats:
@@ -321,11 +320,13 @@ class EffCatModule(LightningModule):
         )
 
         # Calculate total weighted loss
+        ads_center_weight = self.training_args.get("ads_center_loss_weight", 1.0)
+        ads_rel_pos_weight = self.training_args.get("ads_rel_pos_loss_weight", 1.0)
         total_loss = (
             self.training_args["prim_slab_coord_loss_weight"]
             * flow_loss_dict["prim_slab_coord_loss"].mean()
-            + self.training_args["ads_coord_loss_weight"]
-            * flow_loss_dict["ads_coord_loss"].mean()
+            + ads_center_weight * flow_loss_dict["ads_center_loss"].mean()
+            + ads_rel_pos_weight * flow_loss_dict["ads_rel_pos_loss"].mean()
             + self.training_args["length_loss_weight"]
             * flow_loss_dict["length_loss"].mean()
             + self.training_args["angle_loss_weight"]
@@ -456,9 +457,6 @@ class EffCatModule(LightningModule):
     def on_validation_epoch_end(self) -> None:
         # NOTE: This hook is called on ALL ranks in DDP, but we only execute code on rank 0.
         # PyTorch Lightning will synchronize all ranks after this hook completes.
-        # If rank 0 takes too long (e.g., adsorption energy computation), other ranks will
-        # wait and may hit NCCL timeout (default: 30 minutes).
-        # Solution: Disable adsorption computation in DDP by setting compute_adsorption=false.
         if self.global_rank == 0:
             # Filter out None
             valid_outputs = [
@@ -472,7 +470,6 @@ class EffCatModule(LightningModule):
             slab_rmsd_tasks = []
             prim_validity_tasks = []
             slab_validity_tasks = []
-            adsorption_tasks = []
 
             # Collate results from all batches
             for batch_output in valid_outputs:
@@ -595,23 +592,6 @@ class EffCatModule(LightningModule):
                             ads_atom_types[i],
                             prim_slab_atom_mask[i],
                             ads_atom_mask[i],
-                        )
-                    )
-                    
-                    # Adsorption energy task (using assemble logic)
-                    adsorption_tasks.append(
-                        (
-                            sampled_prim_slab_coords[i],
-                            sampled_ads_coords[i],
-                            sampled_lattices[i],
-                            sampled_supercell_matrices[i],
-                            sampled_scaling_factors[i],
-                            prim_slab_atom_types[i],
-                            ads_atom_types[i],
-                            prim_slab_atom_mask[i],
-                            ads_atom_mask[i],
-                            self.validation_args.get("adsorption_device", "cuda"),
-                            self.validation_args.get("adsorption_model", "uma-m-1p1"),
                         )
                     )
 
@@ -799,92 +779,6 @@ class EffCatModule(LightningModule):
                 else:
                     self.val_structural_validity.update(0.0)
 
-            # Execute adsorption energy tasks in main process (reuse calculator)
-            # NOTE: Adsorption computation is disabled by default in DDP due to long runtime
-            compute_adsorption = self.validation_args.get("compute_adsorption", False)
-            adsorption_results_per_item = []
-            
-            if not compute_adsorption:
-                # Adsorption computation disabled - skip entirely
-                rank_zero_info("| Adsorption energy computation disabled (compute_adsorption=false).")
-            elif self._uma_calculator is None:
-                try:
-                    adsorption_device = self.validation_args.get("adsorption_device", "cpu")
-                    adsorption_model = self.validation_args.get("adsorption_model", "uma-m-1p1")
-                    rank_zero_info(f"| Initializing UMA calculator ({adsorption_model}) on {adsorption_device}...")
-                    self._uma_calculator = get_uma_calculator(
-                        model_name=adsorption_model, 
-                        device=adsorption_device
-                    )
-                    rank_zero_info("| UMA calculator initialized successfully.")
-                except Exception as e:
-                    rank_zero_info(f"| WARNING: Failed to initialize UMA calculator: {e}")
-                    self._uma_calculator = None
-            
-            # Compute adsorption energy for each task (in main process)
-            if self._uma_calculator is not None:
-                rank_zero_info(f"| Computing adsorption energy for {len(adsorption_tasks)} structures...")
-                
-                for task_idx, task in enumerate(tqdm(
-                    adsorption_tasks, 
-                    desc="Adsorption energy", 
-                    unit="struct",
-                    leave=False,
-                )):
-                    (
-                        sampled_prim_slab_coords_i,
-                        sampled_ads_coords_i,
-                        sampled_lattices_i,
-                        sampled_supercell_matrices_i,
-                        sampled_scaling_factors_i,
-                        prim_slab_atom_types_i,
-                        ads_atom_types_i,
-                        prim_slab_atom_mask_i,
-                        ads_atom_mask_i,
-                        _device,  # ignored, use self._uma_calculator
-                        _model,   # ignored, use self._uma_calculator
-                    ) = task
-                    
-                    try:
-                        result = compute_adsorption_and_validity_single(
-                            sampled_prim_slab_coords=sampled_prim_slab_coords_i,
-                            sampled_ads_coords=sampled_ads_coords_i,
-                            sampled_lattices=sampled_lattices_i,
-                            sampled_supercell_matrices=sampled_supercell_matrices_i,
-                            sampled_scaling_factors=sampled_scaling_factors_i,
-                            prim_slab_atom_types=prim_slab_atom_types_i,
-                            ads_atom_types=ads_atom_types_i,
-                            prim_slab_atom_mask=prim_slab_atom_mask_i,
-                            ads_atom_mask=ads_atom_mask_i,
-                            calc=self._uma_calculator,
-                        )
-                        adsorption_results_per_item.append(result)
-                    except Exception as e:
-                        rank_zero_info(
-                            f"| WARNING: Adsorption task {task_idx+1}/{len(adsorption_tasks)} failed: {e}"
-                        )
-                        adsorption_results_per_item.append(
-                            [{"E_adsorption": float('nan'), "struct_valid": False}] * n_samples
-                        )
-                
-                rank_zero_info(f"| Adsorption energy computation completed.")
-            else:
-                # Calculator not available, skip all adsorption tasks
-                rank_zero_info("| WARNING: UMA calculator not available. Skipping adsorption energy computation.")
-                for _ in adsorption_tasks:
-                    adsorption_results_per_item.append(
-                        [{"E_adsorption": float('nan'), "struct_valid": False}] * n_samples
-                    )
-
-            # Compute adsorption energy (only if enabled)
-            if compute_adsorption and adsorption_results_per_item:
-                for result_list in adsorption_results_per_item:
-                    for res in result_list:
-                        # Adsorption energy (only for valid energies)
-                        e_ads = res["E_adsorption"]
-                        if not (e_ads != e_ads):  # Check for NaN
-                            self.val_adsorption_energy.update(e_ads)
-
             # Log aggregated metrics
             # Primitive slab RMSD (only when dng=False, as RMSD is not computed when dng=True)
             if not self.dng:
@@ -905,37 +799,25 @@ class EffCatModule(LightningModule):
                 else:
                     self.log("val/avg_slab_rmsd", float("nan"), rank_zero_only=True)
             
-            # Log prim structural validity (always computed, regardless of compute_adsorption)
+            # Log prim structural validity
             self.log(
                 "val/prim_structural_validity_rate",
                 self.val_prim_structural_validity.compute() if self.val_prim_structural_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
             
-            # Log slab structural validity (always computed, regardless of compute_adsorption)
+            # Log slab structural validity
             self.log(
                 "val/structural_validity_rate",
                 self.val_structural_validity.compute() if self.val_structural_validity.update_count > 0 else float("nan"),
                 rank_zero_only=True,
             )
-            
-            # Log adsorption energy (only if computed)
-            if compute_adsorption:
-                if self.val_adsorption_energy.update_count > 0:
-                    self.log(
-                        "val/avg_adsorption_energy",
-                        self.val_adsorption_energy.compute(),
-                        rank_zero_only=True,
-                    )
-                else:
-                    self.log("val/avg_adsorption_energy", float("nan"), rank_zero_only=True)
 
             # Reset metrics for next epoch
             self.val_prim_match_rate.reset()
             self.val_prim_rmsd.reset()
             self.val_slab_match_rate.reset()
             self.val_slab_rmsd.reset()
-            self.val_adsorption_energy.reset()
             self.val_structural_validity.reset()
             self.val_prim_structural_validity.reset()
             self.validation_step_outputs.clear()  # free memory

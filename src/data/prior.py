@@ -57,8 +57,12 @@ class CatPriorSampler:
         # Coordinate standardization parameters (computed from train set)
         prim_slab_coord_mean: List[float] = None,
         prim_slab_coord_std: List[float] = None,
-        ads_coord_mean: List[float] = None,
-        ads_coord_std: List[float] = None,
+        # Adsorbate center (center of mass) standardization parameters
+        ads_center_mean: List[float] = None,
+        ads_center_std: List[float] = None,
+        # Adsorbate relative position standardization parameters
+        ads_rel_pos_mean: List[float] = None,
+        ads_rel_pos_std: List[float] = None,
     ):
         self.coord_std = coord_std
 
@@ -80,18 +84,26 @@ class CatPriorSampler:
         self.prim_slab_coord_mean = torch.tensor(prim_slab_coord_mean, dtype=torch.float32)  # (3,)
         self.prim_slab_coord_std = torch.tensor(prim_slab_coord_std, dtype=torch.float32)  # (3,)
         
-        self.ads_coord_mean = torch.tensor(ads_coord_mean, dtype=torch.float32)  # (3,)
-        self.ads_coord_std = torch.tensor(ads_coord_std, dtype=torch.float32)  # (3,)
+        # Adsorbate center (center of mass) normalization parameters
+        self.ads_center_mean = torch.tensor(ads_center_mean, dtype=torch.float32)  # (3,)
+        self.ads_center_std = torch.tensor(ads_center_std, dtype=torch.float32)  # (3,)
+        
+        # Adsorbate relative position normalization parameters
+        self.ads_rel_pos_mean = torch.tensor(ads_rel_pos_mean, dtype=torch.float32)  # (3,)
+        self.ads_rel_pos_std = torch.tensor(ads_rel_pos_std, dtype=torch.float32)  # (3,)
 
     def sample(self, data: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        """Sample from prior distributions for coords, lattice, and supercell matrix."""
+        """Sample from prior distributions for coords, lattice, and supercell matrix.
+        
+        Now samples ads_center and ads_rel_pos separately instead of ads_coords.
+        """
         prim_slab_cart_coords = data["prim_slab_cart_coords"]
         prim_slab_atom_mask = data["prim_slab_atom_mask"]
-        ads_cart_coords = data["ads_cart_coords"]
+        ads_rel_pos = data.get("ads_rel_pos")  # (B, M, 3)
         ads_atom_mask = data["ads_atom_mask"]
 
         batch_size, num_prim_slab_atoms, _ = prim_slab_cart_coords.shape
-        _, num_ads_atoms, _ = ads_cart_coords.shape
+        num_ads_atoms = ads_rel_pos.shape[1] if ads_rel_pos is not None else ads_atom_mask.shape[1]
         device = prim_slab_cart_coords.device
         dtype = prim_slab_cart_coords.dtype
 
@@ -104,14 +116,22 @@ class CatPriorSampler:
         # Denormalize to raw space (Angstrom)
         prim_slab_coords_0 = self.denormalize_prim_slab_coords(prim_slab_coords_0_normalized)
 
-        # Sample adsorbate coordinates from Gaussian N(0, coord_std^2) in normalized space, then denormalize to raw space
-        ads_coords_0_normalized = (
+        # Sample adsorbate center from Gaussian N(0, coord_std^2) in normalized space, then denormalize to raw space
+        ads_center_0_normalized = (
+            torch.randn(batch_size, 3, device=device, dtype=dtype)
+            * self.coord_std
+        )
+        # Denormalize to raw space (Angstrom)
+        ads_center_0 = self.denormalize_ads_center(ads_center_0_normalized)
+
+        # Sample adsorbate relative positions from Gaussian N(0, coord_std^2) in normalized space, then denormalize to raw space
+        ads_rel_pos_0_normalized = (
             torch.randn(batch_size, num_ads_atoms, 3, device=device, dtype=dtype)
             * self.coord_std
         )
-        ads_coords_0_normalized = ads_coords_0_normalized * ads_atom_mask.unsqueeze(-1)
+        ads_rel_pos_0_normalized = ads_rel_pos_0_normalized * ads_atom_mask.unsqueeze(-1)
         # Denormalize to raw space (Angstrom)
-        ads_coords_0 = self.denormalize_ads_coords(ads_coords_0_normalized)
+        ads_rel_pos_0 = self.denormalize_ads_rel_pos(ads_rel_pos_0_normalized)
 
         # Sample lattice lengths from LogNormal distribution
         lengths_0 = self._lognormal.sample((batch_size,))  # (B, 3)
@@ -137,7 +157,8 @@ class CatPriorSampler:
 
         return {
             "prim_slab_coords_0": prim_slab_coords_0,  # (B, N, 3) raw space (Angstrom)
-            "ads_coords_0": ads_coords_0,  # (B, M, 3) raw space (Angstrom)
+            "ads_center_0": ads_center_0,  # (B, 3) raw space (Angstrom)
+            "ads_rel_pos_0": ads_rel_pos_0,  # (B, M, 3) raw space (Angstrom)
             "lattice_0": lattice_0,  # (B, 6) raw space (Angstrom, degrees)
             "supercell_matrix_0": supercell_matrix_0,  # (B, 3, 3) raw space
             "scaling_factor_0": scaling_factor_0,  # (B,) raw value
@@ -195,28 +216,54 @@ class CatPriorSampler:
         std = self.prim_slab_coord_std.to(coords_normalized.device, coords_normalized.dtype)
         return coords_normalized * std + mean
 
-    def normalize_ads_coords(self, coords: torch.Tensor) -> torch.Tensor:
-        """Standardize adsorbate coordinates using mean and std.
+    def normalize_ads_center(self, ads_center: torch.Tensor) -> torch.Tensor:
+        """Standardize adsorbate center (center of mass) using mean and std.
         
         Args:
-            coords: (B, M, 3) raw adsorbate coordinates in Angstrom
+            ads_center: (B, 3) raw adsorbate center in Angstrom
             
         Returns:
-            (B, M, 3) standardized coordinates
+            (B, 3) standardized center
         """
-        mean = self.ads_coord_mean.to(coords.device, coords.dtype)
-        std = self.ads_coord_std.to(coords.device, coords.dtype)
-        return (coords - mean) / (std + 1e-8)
+        mean = self.ads_center_mean.to(ads_center.device, ads_center.dtype)
+        std = self.ads_center_std.to(ads_center.device, ads_center.dtype)
+        return (ads_center - mean) / (std + 1e-8)
 
-    def denormalize_ads_coords(self, coords_normalized: torch.Tensor) -> torch.Tensor:
-        """Destandardize adsorbate coordinates back to original space.
+    def denormalize_ads_center(self, ads_center_normalized: torch.Tensor) -> torch.Tensor:
+        """Destandardize adsorbate center back to original space.
         
         Args:
-            coords_normalized: (B, M, 3) standardized coordinates
+            ads_center_normalized: (B, 3) standardized center
             
         Returns:
-            (B, M, 3) denormalized coordinates in Angstrom
+            (B, 3) denormalized center in Angstrom
         """
-        mean = self.ads_coord_mean.to(coords_normalized.device, coords_normalized.dtype)
-        std = self.ads_coord_std.to(coords_normalized.device, coords_normalized.dtype)
-        return coords_normalized * std + mean
+        mean = self.ads_center_mean.to(ads_center_normalized.device, ads_center_normalized.dtype)
+        std = self.ads_center_std.to(ads_center_normalized.device, ads_center_normalized.dtype)
+        return ads_center_normalized * std + mean
+
+    def normalize_ads_rel_pos(self, ads_rel_pos: torch.Tensor) -> torch.Tensor:
+        """Standardize adsorbate relative positions using mean and std.
+        
+        Args:
+            ads_rel_pos: (B, M, 3) raw adsorbate relative positions in Angstrom
+            
+        Returns:
+            (B, M, 3) standardized relative positions
+        """
+        mean = self.ads_rel_pos_mean.to(ads_rel_pos.device, ads_rel_pos.dtype)
+        std = self.ads_rel_pos_std.to(ads_rel_pos.device, ads_rel_pos.dtype)
+        return (ads_rel_pos - mean) / (std + 1e-8)
+
+    def denormalize_ads_rel_pos(self, ads_rel_pos_normalized: torch.Tensor) -> torch.Tensor:
+        """Destandardize adsorbate relative positions back to original space.
+        
+        Args:
+            ads_rel_pos_normalized: (B, M, 3) standardized relative positions
+            
+        Returns:
+            (B, M, 3) denormalized relative positions in Angstrom
+        """
+        mean = self.ads_rel_pos_mean.to(ads_rel_pos_normalized.device, ads_rel_pos_normalized.dtype)
+        std = self.ads_rel_pos_std.to(ads_rel_pos_normalized.device, ads_rel_pos_normalized.dtype)
+        return ads_rel_pos_normalized * std + mean

@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from ase import Atoms
 from pymatgen.core import Structure, Lattice
+from pymatgen.core.periodic_table import DummySpecie, Element
 from pymatgen.io.ase import AseAtomsAdaptor
 from ase.geometry import cellpar_to_cell
 from ase.cell import Cell
@@ -129,10 +130,10 @@ def assemble(
     if prim_slab_atom_mask is not None:
         mask = prim_slab_atom_mask.astype(bool)
         prim_slab_coords = generated_prim_slab_coords[mask]
-        prim_slab_types = prim_slab_atom_types[mask]
+        prim_slab_types = [DummySpecie("X") if z == 0 else Element.from_Z(z) for z in prim_slab_atom_types[mask]]
     else:
         prim_slab_coords = generated_prim_slab_coords
-        prim_slab_types = prim_slab_atom_types
+        prim_slab_types = [DummySpecie("X") if z == 0 else Element.from_Z(z) for z in prim_slab_atom_types]
     
     if ads_atom_mask is not None:
         ads_mask = ads_atom_mask.astype(bool)
