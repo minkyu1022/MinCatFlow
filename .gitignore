@@ -41,9 +41,6 @@ wandb/
 outputs/
 .hydra/
 
-# Jupyter Notebook
-*.ipynb
-
 # IDE
 .vscode/
 .idea/
