@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ================= CONFIGURATION =================
-CHECKPOINT_PATH="/home/jovyan/mk-catgen-ckpts/pred_430M_final_L1_relpos/sp_model.ckpt"
+CHECKPOINT_PATH="ckpts/pred_430M_final_L1_relpos/dng_model.ckpt"
 
-DATA_ROOT="/home/jovyan/mk-catgen-data/dataset_per_adsorbate"
+DATA_ROOT="data/dataset_per_adsorbate"
 
-BASE_OUTPUT_DIR="/home/jovyan/mk-catgen-data/sp_traj"
+BASE_OUTPUT_DIR="data/dng_traj"
 
 CUDA_DEVICES_STR="0,1,2,3,4,5,6,7"
 # =================================================
