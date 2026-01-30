@@ -3,8 +3,7 @@
 A flow matching framework for de novo generation and structure prediction of heterogeneous catalysts. CatFlow jointly generates slab structures and adsorbate coordinates within a unified objective, directly capturing surface-adsorbate interactions.
 
 <p align="center">
-  <img src="assets/concept.png" width="37%">
-  <img src="assets/cogen_traj.png" width="53%">
+  <img src="assets/description.png" width="600">
 </p>
 
 ## Key Features
