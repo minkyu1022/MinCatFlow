@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ================= CONFIGURATION =================
-CHECKPOINT_PATH="ckpts/pred_430M_final_L1_relpos/sp_model.ckpt"
+CHECKPOINT_PATH="/home/jovyan/mk-catgen-ckpts/pred_430M_final_L1_relpos/sp_model.ckpt"
 
-DATA_ROOT="data/dataset_per_adsorbate"
+DATA_ROOT="/home/jovyan/mk-catgen-data/dataset_per_adsorbate"
 
-BASE_OUTPUT_DIR="data/sp_results/initial_structures"
+BASE_OUTPUT_DIR="/home/jovyan/mk-catgen-data/sp_traj"
 
 CUDA_DEVICES_STR="0,1,2,3,4,5,6,7"
 # =================================================
@@ -67,7 +67,8 @@ for ((i=0; i<NUM_AVAILABLE_GPUS; i++)); do
                     --sampling_steps 50 \
                     --batch_size 128 \
                     --num_workers 128 \
-                    --gpus 1 > "$LOG_FILE" 2>&1
+                    --gpus 1 > "$LOG_FILE" 2>&1 \
+                    --save_trajectory
 
                 if [ $? -eq 0 ]; then
                     echo "[GPU $GPU_ID] Finished: $formula"
