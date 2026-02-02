@@ -41,10 +41,6 @@ The processed datasets with generated samples and computed energy values are ava
 
 To perform the data processing pipeline manually from raw OC20 structures, follow the instructions below.
 
-### Data Processing
-
-To perform the data processing pipeline manually from raw OC20 structures, follow the instructions below.
-
 ```bash
 # Download and extract OC20 IS2RES set
 wget [https://dl.fbaipublicfiles.com/opencatalystproject/data/is2res_train_val_test_lmdbs.tar.gz](https://dl.fbaipublicfiles.com/opencatalystproject/data/is2res_train_val_test_lmdbs.tar.gz)
