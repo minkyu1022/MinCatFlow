@@ -39,6 +39,19 @@ The processed datasets with generated samples and computed energy values are ava
 
 ### Data Processing
 
+To perform the data processing pipeline manually from raw OC20 structures, follow the instructions below.
+
+# Download and extract OC20 IS2RES set
+wget https://dl.fbaipublicfiles.com/opencatalystproject/data/is2res_train_val_test_lmdbs.tar.gz
+tar -zxvf is2res_train_val_test_lmdbs.tar.gz
+
+# Download OC20 data mapping file
+wget https://dl.fbaipublicfiles.com/opencatalystproject/data/oc20_data_mapping.pkl
+
+# Extract metadata and process into factorized representation
+python scripts/data_processing/extract_metadata.py
+python scripts/processing.py
+
 The factorized representation consists of four components:
 
 1. **Primitive cell** $(S_{\text{prim}})$: The repeating unit containing atomic species, coordinates, and lattice matrix
