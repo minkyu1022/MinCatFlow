@@ -6,8 +6,11 @@ document.addEventListener("DOMContentLoaded", function () {
     ext: "pdb",
   }).then(function (comp) {
     comp.setName("catalyst-sample");
-    comp.addRepresentation("spacefill", {
-      radiusScale: 0.3,
+    // comp.addRepresentation("spacefill", {
+    //   radiusScale: 0.3,
+    // });
+    comp.addRepresentation("cartoon", { // "spacefill"을 "cartoon"으로 변경
+      color: "red"
     });
     comp.autoView();
   }).catch(function (err) {
