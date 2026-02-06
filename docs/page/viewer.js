@@ -1,13 +1,13 @@
 document.addEventListener("DOMContentLoaded", function () {
-  // Fetch CIF file and render with 3Dmol.js
-  fetch("data/relaxed_sample.cif")
+  // Fetch XYZ file and render with 3Dmol.js
+  fetch("data/relaxed_sample.xyz")
     .then(function (response) { return response.text(); })
-    .then(function (cifData) {
+    .then(function (xyzData) {
       var viewer = $3Dmol.createViewer("viewport-sample", {
         backgroundColor: "white",
       });
 
-      viewer.addModel(cifData, "cif");
+      viewer.addModel(xyzData, "xyz");
       viewer.setStyle({}, {
         sphere: { scale: 1.0 },
       });
