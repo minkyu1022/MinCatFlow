@@ -2,8 +2,9 @@ document.addEventListener("DOMContentLoaded", function () {
   // Interactive 3D viewer for relaxed catalyst sample
   var stage = new NGL.Stage("viewport-sample", { backgroundColor: "white" });
 
-  stage.loadFile("data/relaxed_sample.xyz", {
+  stage.loadFile("data/relaxed_sample.pdb", {
     defaultRepresentation: false,
+    ext: "pdb",
   }).then(function (comp) {
     comp.setName("catalyst-sample");
     comp.addRepresentation("ball+stick", {
@@ -11,6 +12,8 @@ document.addEventListener("DOMContentLoaded", function () {
       radiusScale: 0.4,
     });
     comp.autoView();
+  }).catch(function (err) {
+    console.error("Failed to load structure:", err);
   });
 
   // Spin toggle
