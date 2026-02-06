@@ -1,0 +1,42 @@
+document.addEventListener("DOMContentLoaded", function () {
+  // Interactive 3D viewer for relaxed catalyst sample
+  var stage = new NGL.Stage("viewport-sample", { backgroundColor: "white" });
+
+  stage.loadFile("data/relaxed_sample.xyz", {
+    defaultRepresentation: false,
+  }).then(function (comp) {
+    comp.setName("catalyst-sample");
+    comp.addRepresentation("ball+stick", {
+      aspectRatio: 1.5,
+      radiusScale: 0.4,
+    });
+    comp.autoView();
+  });
+
+  // Spin toggle
+  var toggleSpinBtn = document.getElementById("toggleSpin-sample");
+  var isSpinning = false;
+  toggleSpinBtn.addEventListener("click", function () {
+    if (!isSpinning) {
+      stage.setSpin([0, 1, 0], 0.01);
+      isSpinning = true;
+      toggleSpinBtn.textContent = "Stop Spin";
+    } else {
+      stage.setSpin(null, null);
+      isSpinning = false;
+      toggleSpinBtn.textContent = "Spin";
+    }
+  });
+
+  // Reset view
+  var resetViewBtn = document.getElementById("resetView-sample");
+  resetViewBtn.addEventListener("click", function () {
+    var comp = stage.getComponentsByName("catalyst-sample").list[0];
+    if (comp) comp.autoView(500);
+  });
+
+  // Handle window resize
+  window.addEventListener("resize", function () {
+    stage.handleResize();
+  });
+});

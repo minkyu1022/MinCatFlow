@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CatFlow</title>
+  <link rel="stylesheet" type="text/css" href="page/style.css" />
+</head>
+
+<body>
+  <script src="./page/ngl.js"></script>
+  <script src="./page/viewer.js"></script>
+
+  <!-- Title -->
+  <h1>CatFlow</h1>
+  <h3>Flow Matching for De Novo Design of Heterogeneous Catalysts</h3>
+
+  <!-- Authors -->
+  <div class="authors">
+    <!-- Add author links here -->
+  </div>
+
+  <!-- Badges -->
+  <div class="badges">
+    <!-- <a href="#" style="color: red;">Paper</a>&nbsp;&nbsp; -->
+    <!-- <a href="#" style="color: blue;">Code</a> -->
+  </div>
+
+  <!-- Abstract -->
+  <div class="section">
+    <h2>Overview</h2>
+    <p class="intro">
+      Discovering heterogeneous catalysts tailored for specific reaction intermediates remains a fundamental bottleneck
+      in materials science. While traditional trial-and-error methods and recent generative models have shown promise,
+      they struggle to capture the intrinsic coupling between surface geometry and adsorbate interactions.
+      We propose <strong>CatFlow</strong>, a flow matching-based framework for de novo design and structure prediction of
+      heterogeneous catalysts. Our model operates on a primitive cell-based factorized representation of the
+      slab-adsorbate complex, reducing the number of learnable variables by an average of 9.2x while explicitly encoding
+      the surface orientation of the slab-adsorbate interface. Experiments on the Open Catalyst 2020 dataset demonstrate
+      that CatFlow significantly improves the structural fidelity of generated catalysts compared to autoregressive and
+      sequential baselines. Further experiments show that the generated structures accurately capture the adsorption
+      energy distributions of physically plausible interfaces and lie closer to thermodynamic local minima.
+    </p>
+  </div>
+
+  <!-- Concept Figure -->
+  <div class="section">
+    <h2>Concept</h2>
+    <div class="figure-container">
+      <img src="figures/concept.png" alt="CatFlow concept" />
+    </div>
+    <p class="caption">
+      CatFlow generates slab-adsorbate complexes via flow matching on a factorized primitive cell representation,
+      capturing the coupling between surface geometry and adsorbate placement.
+    </p>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Co-generation Trajectory Figure -->
+  <div class="section">
+    <h2>Co-generation Trajectory</h2>
+    <div class="figure-container">
+      <img src="figures/cogen_traj.png" alt="CatFlow co-generation trajectory" />
+    </div>
+    <p class="caption">
+      Visualization of the co-generation process: CatFlow simultaneously generates the slab structure and
+      adsorbate placement in a coupled manner, producing physically consistent catalyst-adsorbate interfaces.
+    </p>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Generation + Relaxation Trajectory GIF -->
+  <div class="section">
+    <h2>Sample Generation and Relaxation</h2>
+    <p class="intro">
+      CatFlow generates a catalyst-adsorbate complex through a flow matching trajectory (generation phase),
+      followed by structure relaxation using the UMA machine learning interatomic potential (relaxation phase).
+      The relaxation drives the generated structure toward a thermodynamic local minimum.
+    </p>
+    <div class="gif-container">
+      <img src="figures/full_trajectory.gif" alt="Generation and relaxation trajectory" />
+    </div>
+    <p class="caption">
+      Generation trajectory (flow matching) followed by UMA relaxation. The structure evolves from noise to a
+      physically plausible slab-adsorbate complex and is then relaxed to a local energy minimum.
+    </p>
+
+    <!-- Energy Table -->
+    <table class="energy-table">
+      <tr>
+        <th>Metric</th>
+        <th>Value</th>
+      </tr>
+      <tr>
+        <td>E<sub>ads</sub> (unrelaxed)</td>
+        <td>2.1352 eV</td>
+      </tr>
+      <tr>
+        <td>E<sub>ads</sub> (relaxed)</td>
+        <td>-1.8153 eV</td>
+      </tr>
+    </table>
+    <p class="caption">
+      Adsorption energy before and after relaxation with UMA (Universal Machine-learning interAtomic potential).
+      The negative relaxed E<sub>ads</sub> indicates a thermodynamically favorable adsorption configuration.
+    </p>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Interactive 3D Viewer -->
+  <div class="section">
+    <h2>Interactive 3D Viewer</h2>
+    <p class="intro">
+      Explore the final relaxed catalyst-adsorbate structure interactively.
+      Drag to rotate, scroll to zoom, and use the buttons below to control the view.
+    </p>
+    <div class="viewer-container">
+      <div id="viewport-sample" style="width: 500px; height: 500px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 4px;"></div>
+      <div class="button-container">
+        <button id="toggleSpin-sample">Spin</button>
+        <button id="resetView-sample">Reset View</button>
+      </div>
+    </div>
+    <ul class="instructions">
+      <li>Drag (left click): rotate the structure</li>
+      <li>Scroll (up/down): zoom in/out</li>
+      <li>Spin button: toggle auto-rotation</li>
+      <li>Reset View: return to default camera position</li>
+    </ul>
+  </div>
+
+</body>
+
+</html>
