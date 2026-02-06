@@ -14,42 +14,42 @@
 <body>
   <script src="./page/ngl.js?v=6"></script>
   <script>
-  document.addEventListener("DOMContentLoaded", function () {
-    var stage = new NGL.Stage("viewport-sample", { backgroundColor: "#f0f0f0" });
-    stage.loadFile("data/relaxed_sample.pdb?v=6", {
-      defaultRepresentation: false,
-      ext: "pdb",
-    }).then(function (comp) {
-      comp.setName("catalyst-sample");
-      comp.addRepresentation("spacefill", {
-        radiusScale: 0.3,
+    document.addEventListener("DOMContentLoaded", function () {
+      var stage = new NGL.Stage("viewport-sample", { backgroundColor: "#f0f0f0" });
+      stage.loadFile("data/relaxed_sample.pdb?v=6", {
+        defaultRepresentation: false,
+        ext: "pdb",
+      }).then(function (comp) {
+        comp.setName("catalyst-sample");
+        comp.addRepresentation("spacefill", {
+          radiusScale: 0.3,
+        });
+        comp.autoView();
+      }).catch(function (err) {
+        console.error("Failed to load structure:", err);
       });
-      comp.autoView();
-    }).catch(function (err) {
-      console.error("Failed to load structure:", err);
+      var toggleSpinBtn = document.getElementById("toggleSpin-sample");
+      var isSpinning = false;
+      toggleSpinBtn.addEventListener("click", function () {
+        if (!isSpinning) {
+          stage.setSpin([0, 1, 0], 0.01);
+          isSpinning = true;
+          toggleSpinBtn.textContent = "Stop Spin";
+        } else {
+          stage.setSpin(null, null);
+          isSpinning = false;
+          toggleSpinBtn.textContent = "Spin";
+        }
+      });
+      var resetViewBtn = document.getElementById("resetView-sample");
+      resetViewBtn.addEventListener("click", function () {
+        var comp = stage.getComponentsByName("catalyst-sample").list[0];
+        if (comp) comp.autoView(500);
+      });
+      window.addEventListener("resize", function () {
+        stage.handleResize();
+      });
     });
-    var toggleSpinBtn = document.getElementById("toggleSpin-sample");
-    var isSpinning = false;
-    toggleSpinBtn.addEventListener("click", function () {
-      if (!isSpinning) {
-        stage.setSpin([0, 1, 0], 0.01);
-        isSpinning = true;
-        toggleSpinBtn.textContent = "Stop Spin";
-      } else {
-        stage.setSpin(null, null);
-        isSpinning = false;
-        toggleSpinBtn.textContent = "Spin";
-      }
-    });
-    var resetViewBtn = document.getElementById("resetView-sample");
-    resetViewBtn.addEventListener("click", function () {
-      var comp = stage.getComponentsByName("catalyst-sample").list[0];
-      if (comp) comp.autoView(500);
-    });
-    window.addEventListener("resize", function () {
-      stage.handleResize();
-    });
-  });
   </script>
 
   <!-- Title -->
@@ -70,12 +70,13 @@
   <!-- Abstract -->
   <div class="section">
     <h2>Overview</h2>
-    <p class="caption">Last updated: 2026-02-07 v6 (full cache bust, radiusSize=0.4)</p>
+    <p class="caption">Last updated: 2026-02-07 v7</p>
     <p class="intro">
       Discovering heterogeneous catalysts tailored for specific reaction intermediates remains a fundamental bottleneck
       in materials science. While traditional trial-and-error methods and recent generative models have shown promise,
       they struggle to capture the intrinsic coupling between surface geometry and adsorbate interactions.
-      We propose <strong>CatFlow</strong>, a flow matching-based framework for de novo design and structure prediction of
+      We propose <strong>CatFlow</strong>, a flow matching-based framework for de novo design and structure prediction
+      of
       heterogeneous catalysts. Our model operates on a primitive cell-based factorized representation of the
       slab-adsorbate complex, reducing the number of learnable variables by an average of 9.2x while explicitly encoding
       the surface orientation of the slab-adsorbate interface. Experiments on the Open Catalyst 2020 dataset demonstrate
@@ -132,7 +133,8 @@
       Drag to rotate, scroll to zoom, and use the buttons below to control the view.
     </p>
     <div class="viewer-container">
-      <div id="viewport-sample" style="width: 500px; height: 500px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 4px;"></div>
+      <div id="viewport-sample"
+        style="width: 500px; height: 500px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 4px;"></div>
       <div class="button-container">
         <button id="toggleSpin-sample">Spin</button>
         <button id="resetView-sample">Reset View</button>
