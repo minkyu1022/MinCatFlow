@@ -8,7 +8,7 @@ document.addEventListener("DOMContentLoaded", function () {
     comp.setName("catalyst-sample");
     comp.addRepresentation("spacefill", {
       radiusType: "size",
-      radiusSize: 0.7,
+      radiusSize: 0.4,
     });
     comp.autoView();
   }).catch(function (err) {
