@@ -16,18 +16,21 @@
   <script src="./page/viewer.js?v=sleep"></script>
 
   <!-- Title -->
-  <h1>CatFlow</h1>
-  <h3>Flow Matching for De Novo Design of Heterogeneous Catalysts</h3>
+  <h1>CatFlow: Co-generation of Slab-Adsorbate Systems via Flow Matching</h1>
+  <h3>De Novo Design of Heterogeneous Catalysts</h3>
 
   <!-- Authors -->
   <div class="authors">
-    <!-- Add author links here -->
+    <a href="https://minkyu1022.github.io/mkkim/">Minkyu Kim</a>,
+    <a href="https://nayoung10.github.io/">Nayoung Kim</a>,
+    <a href="https://scholar.google.com/citations?hl=ko&user=FqIni_IAAAAJ">Honghui Kim</a>,
+    <a href="https://sungsoo-ahn.github.io/">Sungsoo Ahn</a>
   </div>
 
   <!-- Badges -->
   <div class="badges">
-    <!-- <a href="#" style="color: red;">Paper</a>&nbsp;&nbsp; -->
-    <!-- <a href="#" style="color: blue;">Code</a> -->
+    <a href="https://arxiv.org/abs/2602.05372">Paper</a>&nbsp;&nbsp;
+    <a href="https://github.com/minkyu1022/CatFlow">Code</a>
   </div>
 
   <!-- Abstract -->
@@ -52,17 +55,13 @@
   <div class="section">
     <h2>Sample Generation and Relaxation</h2>
     <p class="intro">
-      CatFlow generates a catalyst-adsorbate complex through a flow matching trajectory (generation phase),
-      followed by structure relaxation using the UMA machine learning interatomic potential (relaxation phase).
+      CatFlow generates a slab-adsorbate system through continuous and discrete flow matching trajectory,
+      followed by structure relaxation using the UMA-s-1p1.
       The relaxation drives the generated structure toward a thermodynamic local minimum.
     </p>
     <div class="gif-container">
       <img src="figures/full_trajectory.gif" alt="Generation and relaxation trajectory" />
     </div>
-    <p class="caption">
-      Generation trajectory (flow matching) followed by UMA relaxation. The structure evolves from noise to a
-      physically plausible slab-adsorbate complex and is then relaxed to a local energy minimum.
-    </p>
 
     <!-- Energy Table -->
     <table class="energy-table">
@@ -80,8 +79,8 @@
       </tr>
     </table>
     <p class="caption">
-      Adsorption energy before and after relaxation with UMA (Universal Machine-learning interAtomic potential).
-      The negative relaxed E<sub>ads</sub> indicates a thermodynamically favorable adsorption configuration.
+      Adsorption energy before and after relaxation. The negative relaxed E<sub>ads</sub> indicates a thermodynamically
+      favorable adsorption configuration.
     </p>
   </div>
 
@@ -91,7 +90,7 @@
   <div class="section">
     <h2>Interactive 3D Viewer</h2>
     <p class="intro">
-      Explore the final relaxed catalyst-adsorbate structure interactively.
+      Explore the generated slab-adsorbate system structure interactively.
       Drag to rotate, scroll to zoom, and use the buttons below to control the view.
     </p>
     <div class="viewer-container">
@@ -120,7 +119,7 @@
       <img src="figures/concept.png" alt="CatFlow concept" />
     </div>
     <p class="caption">
-      CatFlow generates slab-adsorbate complexes via flow matching on a factorized primitive cell representation,
+      CatFlow generates slab-adsorbate systems via flow matching on a factorized representation,
       capturing the coupling between surface geometry and adsorbate placement.
     </p>
   </div>
@@ -135,7 +134,7 @@
     </div>
     <p class="caption">
       Visualization of the co-generation process: CatFlow simultaneously generates the slab structure and
-      adsorbate placement in a coupled manner, producing physically consistent catalyst-adsorbate interfaces.
+      adsorbate positions in a coupled manner, producing physically consistent slab-adsorbate systems.
     </p>
   </div>
 
